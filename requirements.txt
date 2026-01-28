@@ -1,0 +1,5 @@
+streamlit
+networkx
+pyvis
+pandas
+google-genai
