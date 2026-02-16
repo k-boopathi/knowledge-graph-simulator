@@ -2,7 +2,6 @@ import streamlit as st
 import sys
 import os
 import networkx as nx
-import requests
 from pyvis.network import Network
 import streamlit.components.v1 as components
 
@@ -16,31 +15,12 @@ from modules.entity_typer import EntityTyper
 from modules.export_utils import graph_to_json_bytes, graph_to_csv_bytes, graph_to_pdf_bytes
 from modules.cooccurrence_builder import CooccurrenceGraphBuilder
 
-# Optional Ollama extractor
-try:
-    from modules.extractors.ollama_extractor import OllamaExtractor
-    OLLAMA_AVAILABLE = True
-except Exception:
-    OLLAMA_AVAILABLE = False
+
+st.set_page_config(page_title="Knowledge Graph Simulator", layout="wide")
+st.title("Knowledge Graph Simulator")
+st.caption("Web Graph • Analytics • Coloring • Export • Filters")
 
 
-def ollama_is_running() -> bool:
-    """Quick health check for local Ollama server."""
-    try:
-        r = requests.get("http://localhost:11434/api/tags", timeout=2)
-        return r.status_code == 200
-    except Exception:
-        return False
-
-
-st.set_page_config(page_title="Knowledge Graph Simulator", layout="wide", page_icon="🕸️")
-st.title("🕸️ Knowledge Graph Simulator")
-st.caption("Wordlit-style Web Graph + Fact KG • Analytics • Coloring • Export • Filters")
-
-
-# -----------------------------
-# Session state
-# -----------------------------
 if "graph_manager" not in st.session_state:
     st.session_state.graph_manager = GraphManager()
 
@@ -53,28 +33,22 @@ if "co_builder" not in st.session_state:
 if "last_input_text" not in st.session_state:
     st.session_state.last_input_text = ""
 
-# ✅ Always have a model name available
-if "model_name" not in st.session_state:
-    st.session_state.model_name = "llama3.2:3b"
 
-
-# -----------------------------
-# Sidebar
-# -----------------------------
 with st.sidebar:
     st.header("Controls")
 
-    graph_mode = st.radio(
-        "Graph Mode",
-        ["🕸️ Web Graph (Wordlit)", "🧠 Fact Graph (Triples)"],
-        index=0,
-        help="Web Graph links entities that co-occur in sentences (always web-like). Fact Graph uses extracted triples."
-    )
+    st.write("Graph Mode: Web Graph")
+    st.caption("Web Graph links entities that co-occur in sentences to form a web-like structure.")
 
     st.divider()
 
-    # Filters
     min_conf = st.slider("Min confidence", 0.0, 1.0, 0.20, 0.05)
+
+    show_edge_labels = st.checkbox("Show edge labels", value=False)
+    if not show_edge_labels:
+        st.caption("Edge labels are hidden for a cleaner graph.")
+
+    st.divider()
 
     show_types = {
         "PERSON": st.checkbox("Show PERSON", True),
@@ -86,34 +60,13 @@ with st.sidebar:
 
     st.divider()
 
-    # ✅ Model selector stored in session_state so it always exists
-    if graph_mode == "🧠 Fact Graph (Triples)":
-        if not OLLAMA_AVAILABLE:
-            st.warning("OllamaExtractor not found. Fact mode requires modules/extractors/ollama_extractor.py")
-        else:
-            st.session_state.model_name = st.selectbox(
-                "Local model (Ollama)",
-                ["llama3.2:3b", "llama3.1:8b"],
-                index=0 if st.session_state.model_name == "llama3.2:3b" else 1
-            )
-
-            running = ollama_is_running()
-            if running:
-                st.success("Ollama server detected ✅")
-            else:
-                st.error("Ollama server NOT running ❌")
-                st.caption("Start it with: `ollama serve`  (and pull a model: `ollama pull llama3.2:3b`)")
-
-    if st.button("🗑️ Clear Graph"):
+    if st.button("Clear Graph"):
         st.session_state.graph_manager.reset_graph()
         st.session_state.last_input_text = ""
-        st.success("Cleared")
+        st.success("Graph cleared")
         st.rerun()
 
 
-# -----------------------------
-# Layout
-# -----------------------------
 col_graph, col_side = st.columns([3, 2])
 
 with col_graph:
@@ -122,52 +75,30 @@ with col_graph:
     text_input = st.text_area(
         "Paste any text:",
         height=230,
-        placeholder="Paste any paragraph. Web Graph mode will always produce a connected-looking graph."
+        placeholder="Paste any paragraph. The Web Graph will create a connected graph based on entity co-occurrence."
     )
 
-    if st.button("🚀 Build Graph"):
+    if st.button("Build Graph"):
         if not text_input.strip():
             st.warning("Please paste some text first.")
         else:
             st.session_state.last_input_text = text_input
             st.session_state.graph_manager.reset_graph()
 
-            if graph_mode == "🕸️ Web Graph (Wordlit)":
-                web_g = st.session_state.co_builder.build(text_input)
+            web_g = st.session_state.co_builder.build(text_input)
 
-                triples = []
-                for u, v, data in web_g.edges(data=True):
-                    triples.append((u, data.get("label", "co-occurs"), v, float(data.get("confidence", 0.3))))
+            edges_for_manager = []
+            for u, v, data in web_g.edges(data=True):
+                label = data.get("label", "co-occurs")
+                confidence = float(data.get("confidence", 0.30))
+                edges_for_manager.append((u, label, v, confidence))
 
-                st.session_state.graph_manager.add_triples(triples)
-                st.success(f"Web Graph built: {web_g.number_of_nodes()} entities, {web_g.number_of_edges()} links.")
+            st.session_state.graph_manager.add_triples(edges_for_manager)
 
-            else:
-                # Fact Graph mode (Triples via Ollama)
-                if not OLLAMA_AVAILABLE:
-                    st.error("OllamaExtractor missing. Switch to Web Graph mode or add the extractor file.")
-                elif not ollama_is_running():
-                    st.error("Ollama server is not running. Start it with: `ollama serve`")
-                else:
-                    try:
-                        extractor = OllamaExtractor(model=st.session_state.model_name)
-                        triples = extractor.extract(text_input)  # list of dicts
-                    except Exception as e:
-                        st.error(f"Ollama error: {e}")
-                        triples = []
+            st.success(
+                f"Web Graph built: {web_g.number_of_nodes()} entities, {web_g.number_of_edges()} links."
+            )
 
-                    if triples:
-                        st.session_state.graph_manager.add_triples(triples)
-                        st.success(f"Fact Graph built: {len(triples)} triples added.")
-                        with st.expander("🔎 Debug: triples"):
-                            st.write(triples)
-                    else:
-                        st.warning("No relationships extracted in Fact mode. Try Web mode or check Ollama output.")
-                        st.caption("Tip: open the terminal — the extractor prints the raw Ollama response.")
-
-    # -----------------------------
-    # Filtered visualization graph
-    # -----------------------------
     g = st.session_state.graph_manager.get_graph()
     type_map = st.session_state.entity_typer.extract_types_from_text(st.session_state.last_input_text)
 
@@ -208,28 +139,47 @@ with col_graph:
             )
 
         for u, v, data in viz.edges(data=True):
-            label = data.get("label") or data.get("predicate") or "related"
-            conf = float(data.get("confidence", data.get("weight", 0.3)))
+            raw_label = data.get("label") or data.get("predicate") or "related"
+            conf = float(data.get("confidence", data.get("weight", 0.30)))
             width = 1 + min(6, conf * 6)
-            net.add_edge(u, v, label=label, width=width, arrows="to", title=f"{label} (conf {conf})")
 
-        net.set_options("""
-{
-  "physics": {
+            edge_label = raw_label if show_edge_labels else ""
+            edge_title = raw_label
+
+            net.add_edge(
+                u, v,
+                label=edge_label,
+                width=width,
+                arrows="to",
+                title=f"{edge_title} (conf {conf:.2f})"
+            )
+
+        edge_font_size = 14 if show_edge_labels else 0
+        node_font_size = 18
+
+        net.set_options(f"""
+{{
+  "physics": {{
     "enabled": true,
     "solver": "forceAtlas2Based",
-    "forceAtlas2Based": {
+    "forceAtlas2Based": {{
       "gravitationalConstant": -90,
       "centralGravity": 0.03,
       "springLength": 160,
       "springConstant": 0.06,
       "avoidOverlap": 1
-    },
-    "stabilization": { "enabled": true, "iterations": 1400 }
-  },
-  "edges": { "smooth": { "enabled": true, "type": "dynamic" } },
-  "nodes": { "shape": "dot", "font": { "size": 18 } }
-}
+    }},
+    "stabilization": {{ "enabled": true, "iterations": 1400 }}
+  }},
+  "edges": {{
+    "smooth": {{ "enabled": true, "type": "dynamic" }},
+    "font": {{ "size": {edge_font_size}, "align": "middle" }}
+  }},
+  "nodes": {{
+    "shape": "dot",
+    "font": {{ "size": {node_font_size} }}
+  }}
+}}
 """)
 
         output_file = os.path.join(BASE_DIR, "graph_output.html")
@@ -277,6 +227,6 @@ with col_side:
     top_entities = analytics.top_entities(10) if hasattr(analytics, "top_entities") else []
     pdf_bytes = graph_to_pdf_bytes(base_g, title="Knowledge Graph Report", top_entities=top_entities)
 
-    st.download_button("⬇️ Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
-    st.download_button("⬇️ Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
-    st.download_button("⬇️ Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
+    st.download_button("Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
+    st.download_button("Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
+    st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
