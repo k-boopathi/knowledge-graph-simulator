@@ -182,3 +182,4 @@ class SpacyRelationExtractor:
         left = token.left_edge.i
         right = token.right_edge.i
         return token.doc[left:right + 1].text.strip()
+
