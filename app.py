@@ -14,7 +14,6 @@ from modules.text_analytics import TextAnalytics
 from modules.entity_typer import EntityTyper
 from modules.export_utils import graph_to_json_bytes, graph_to_csv_bytes, graph_to_pdf_bytes
 from modules.cooccurrence_builder import CooccurrenceGraphBuilder
-
 from modules.extractors.spacy_relation_extractor import SpacyRelationExtractor
 from modules.domains.carbonsat.lexicon import CARBONSAT_LEXICON
 
@@ -57,41 +56,41 @@ with st.sidebar:
         "Graph Mode",
         ["Web Graph", "CarbonSat Fact Graph"],
         index=0,
-        help="Web Graph links co-occurring entities. CarbonSat Fact Graph extracts triples and applies CarbonSat typing."
+        help="Web Graph links co-occurring entities. CarbonSat Fact Graph extracts triples and applies CarbonSat typing.",
+        key="graph_mode_radio"
     )
 
     st.divider()
 
-    min_conf = st.slider("Min confidence", 0.0, 1.0, 0.20, 0.05)
-    show_edge_labels = st.checkbox("Show edge labels", value=False)
+    min_conf = st.slider("Min confidence", 0.0, 1.0, 0.20, 0.05, key="min_conf_slider")
+    show_edge_labels = st.checkbox("Show edge labels", value=False, key="show_edge_labels_checkbox")
 
     st.divider()
 
-    # Always define both sets (avoid missing variable issues on reruns)
-    web_type_checks = {
-        "PERSON": st.checkbox("Show PERSON", True),
-        "ORG": st.checkbox("Show ORG", True),
-        "LOC": st.checkbox("Show LOC", True),
-        "PRODUCT": st.checkbox("Show PRODUCT", True),
-        "UNKNOWN": st.checkbox("Show UNKNOWN", True),
-    }
-
-    carbonsat_type_checks = {
-        "MISSION": st.checkbox("Show MISSION", True),
-        "GAS": st.checkbox("Show GAS", True),
-        "PRODUCT": st.checkbox("Show PRODUCT", True),
-        "ORBIT": st.checkbox("Show ORBIT", True),
-        "PARAMETER": st.checkbox("Show PARAMETER", True),
-        "ORG": st.checkbox("Show ORG", True),
-        "LOC": st.checkbox("Show LOC", True),
-        "UNKNOWN": st.checkbox("Show UNKNOWN", True),
-    }
-
-    show_types = web_type_checks if graph_mode == "Web Graph" else carbonsat_type_checks
+    # IMPORTANT: unique keys for all checkboxes
+    if graph_mode == "Web Graph":
+        show_types = {
+            "PERSON": st.checkbox("Show PERSON", True, key="web_show_person"),
+            "ORG": st.checkbox("Show ORG", True, key="web_show_org"),
+            "LOC": st.checkbox("Show LOC", True, key="web_show_loc"),
+            "PRODUCT": st.checkbox("Show PRODUCT", True, key="web_show_product"),
+            "UNKNOWN": st.checkbox("Show UNKNOWN", True, key="web_show_unknown"),
+        }
+    else:
+        show_types = {
+            "MISSION": st.checkbox("Show MISSION", True, key="cs_show_mission"),
+            "GAS": st.checkbox("Show GAS", True, key="cs_show_gas"),
+            "PRODUCT": st.checkbox("Show PRODUCT", True, key="cs_show_product"),
+            "ORBIT": st.checkbox("Show ORBIT", True, key="cs_show_orbit"),
+            "PARAMETER": st.checkbox("Show PARAMETER", True, key="cs_show_parameter"),
+            "ORG": st.checkbox("Show ORG", True, key="cs_show_org"),
+            "LOC": st.checkbox("Show LOC", True, key="cs_show_loc"),
+            "UNKNOWN": st.checkbox("Show UNKNOWN", True, key="cs_show_unknown"),
+        }
 
     st.divider()
 
-    if st.button("Clear Graph"):
+    if st.button("Clear Graph", key="clear_graph_button"):
         st.session_state.graph_manager.reset_graph()
         st.session_state.last_input_text = ""
         st.success("Graph cleared")
@@ -118,9 +117,10 @@ with col_graph:
             "The mission aims to measure atmospheric carbon dioxide and methane.\n"
             "CarbonSat operates in low Earth orbit.\n"
         ),
+        key="text_input_area"
     )
 
-    if st.button("Build Graph"):
+    if st.button("Build Graph", key="build_graph_button"):
         if not text_input.strip():
             st.warning("Please paste some text first.")
         else:
@@ -132,7 +132,6 @@ with col_graph:
 
                 edges_for_manager = []
                 for u, v, data in web_g.edges(data=True):
-                    # Force a non-empty label to avoid confusing visuals
                     label = str(data.get("label") or "co-occurs")
                     confidence = float(data.get("confidence", 0.30))
                     edges_for_manager.append((u, label, v, confidence))
@@ -162,13 +161,11 @@ with col_graph:
     viz = nx.DiGraph()
 
     if graph_mode == "Web Graph":
-        # Use spaCy NER typing from EntityTyper (not lexicon)
         type_map = st.session_state.entity_typer.extract_types_from_text(st.session_state.last_input_text)
 
         for n in g.nodes():
             t = st.session_state.entity_typer.type_for_node(n, type_map)
 
-            # Normalize common spaCy labels to our UI labels
             if t in ("GPE", "FAC"):
                 t = "LOC"
             if t not in show_types:
@@ -177,7 +174,6 @@ with col_graph:
             if show_types.get(t, False):
                 viz.add_node(n, entity_type=t)
     else:
-        # CarbonSat lexicon typing
         for n in g.nodes():
             t = carbonsat_type(n)
             if t not in show_types:
@@ -235,7 +231,6 @@ with col_graph:
             conf = float(data.get("confidence", data.get("weight", 0.30)))
             width = 1 + min(6, conf * 6)
 
-            # Hide labels if user wants cleaner look, but keep hover title
             edge_label = raw_label if show_edge_labels else ""
             edge_title = raw_label
 
