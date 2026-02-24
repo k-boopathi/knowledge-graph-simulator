@@ -1,6 +1,8 @@
 import streamlit as st
 import sys
 import os
+print(os.listdir("modules"))
+print(os.listdir("modules/extractors"))
 import networkx as nx
 from pyvis.network import Network
 import streamlit.components.v1 as components
@@ -296,4 +298,5 @@ with col_side:
     st.download_button("Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
     st.download_button("Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
     st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
+
 
