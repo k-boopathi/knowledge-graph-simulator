@@ -1,6 +1,6 @@
-import streamlit as st
-import sys
 import os
+import sys
+import streamlit as st
 import networkx as nx
 from pyvis.network import Network
 import streamlit.components.v1 as components
@@ -28,6 +28,9 @@ st.set_page_config(page_title="Knowledge Graph Simulator", layout="wide")
 st.title("Knowledge Graph Simulator")
 st.caption("Web Graph and CarbonSat Fact Graph. Analytics, coloring, export, filters.")
 
+# -----------------------------
+# Session state init
+# -----------------------------
 if "graph_manager" not in st.session_state:
     st.session_state.graph_manager = GraphManager()
 
@@ -37,13 +40,16 @@ if "entity_typer" not in st.session_state:
 if "co_builder" not in st.session_state:
     st.session_state.co_builder = CooccurrenceGraphBuilder()
 
-if "last_input_text" not in st.session_state:
-    st.session_state.last_input_text = ""
-
 if "fact_extractor" not in st.session_state:
     st.session_state.fact_extractor = SpacyRelationExtractor()
 
+if "last_input_text" not in st.session_state:
+    st.session_state.last_input_text = ""
 
+
+# -----------------------------
+# Sidebar controls
+# -----------------------------
 with st.sidebar:
     st.header("Controls")
 
@@ -51,38 +57,37 @@ with st.sidebar:
         "Graph Mode",
         ["Web Graph", "CarbonSat Fact Graph"],
         index=0,
-        help="Web Graph links co-occurring entities. CarbonSat Fact Graph extracts triples and filters entities using a CarbonSat lexicon."
+        help="Web Graph links co-occurring entities. CarbonSat Fact Graph extracts triples and applies CarbonSat typing."
     )
 
     st.divider()
 
     min_conf = st.slider("Min confidence", 0.0, 1.0, 0.20, 0.05)
-
     show_edge_labels = st.checkbox("Show edge labels", value=False)
-    if not show_edge_labels:
-        st.caption("Edge labels are hidden for a cleaner graph.")
 
     st.divider()
 
-    if graph_mode == "Web Graph":
-        show_types = {
-            "PERSON": st.checkbox("Show PERSON", True),
-            "ORG": st.checkbox("Show ORG", True),
-            "LOC": st.checkbox("Show LOC", True),
-            "PRODUCT": st.checkbox("Show PRODUCT", True),
-            "UNKNOWN": st.checkbox("Show UNKNOWN", True),
-        }
-    else:
-        show_types = {
-            "MISSION": st.checkbox("Show MISSION", True),
-            "GAS": st.checkbox("Show GAS", True),
-            "PRODUCT": st.checkbox("Show PRODUCT", True),
-            "ORBIT": st.checkbox("Show ORBIT", True),
-            "PARAMETER": st.checkbox("Show PARAMETER", True),
-            "ORG": st.checkbox("Show ORG", True),
-            "LOC": st.checkbox("Show LOC", True),
-            "UNKNOWN": st.checkbox("Show UNKNOWN", True),
-        }
+    # Always define both sets (avoid missing variable issues on reruns)
+    web_type_checks = {
+        "PERSON": st.checkbox("Show PERSON", True),
+        "ORG": st.checkbox("Show ORG", True),
+        "LOC": st.checkbox("Show LOC", True),
+        "PRODUCT": st.checkbox("Show PRODUCT", True),
+        "UNKNOWN": st.checkbox("Show UNKNOWN", True),
+    }
+
+    carbonsat_type_checks = {
+        "MISSION": st.checkbox("Show MISSION", True),
+        "GAS": st.checkbox("Show GAS", True),
+        "PRODUCT": st.checkbox("Show PRODUCT", True),
+        "ORBIT": st.checkbox("Show ORBIT", True),
+        "PARAMETER": st.checkbox("Show PARAMETER", True),
+        "ORG": st.checkbox("Show ORG", True),
+        "LOC": st.checkbox("Show LOC", True),
+        "UNKNOWN": st.checkbox("Show UNKNOWN", True),
+    }
+
+    show_types = web_type_checks if graph_mode == "Web Graph" else carbonsat_type_checks
 
     st.divider()
 
@@ -93,8 +98,14 @@ with st.sidebar:
         st.rerun()
 
 
+# -----------------------------
+# Layout
+# -----------------------------
 col_graph, col_side = st.columns([3, 2])
 
+# -----------------------------
+# Graph column
+# -----------------------------
 with col_graph:
     st.subheader("Graph Visualization")
 
@@ -102,11 +113,11 @@ with col_graph:
         "Paste text:",
         height=230,
         placeholder=(
-            "Example (CarbonSat domain):\n"
-            "CarbonSat measures CO2 and CH4.\n"
-            "CarbonSat produces Level-2 products.\n"
-            "CarbonSat operates in a sun-synchronous orbit.\n"
-        )
+            "Example:\n"
+            "CarbonSat is a proposed Earth observation mission developed by ESA.\n"
+            "The mission aims to measure atmospheric carbon dioxide and methane.\n"
+            "CarbonSat operates in low Earth orbit.\n"
+        ),
     )
 
     if st.button("Build Graph"):
@@ -121,35 +132,43 @@ with col_graph:
 
                 edges_for_manager = []
                 for u, v, data in web_g.edges(data=True):
-                    label = data.get("label", "co-occurs")
+                    # Force a non-empty label to avoid confusing visuals
+                    label = str(data.get("label") or "co-occurs")
                     confidence = float(data.get("confidence", 0.30))
                     edges_for_manager.append((u, label, v, confidence))
 
-                st.session_state.graph_manager.add_triples(edges_for_manager)
+                added = st.session_state.graph_manager.add_triples(edges_for_manager)
 
                 st.success(
-                    f"Web Graph built: {web_g.number_of_nodes()} entities, {web_g.number_of_edges()} links."
+                    f"Web Graph built: {web_g.number_of_nodes()} entities, {web_g.number_of_edges()} links "
+                    f"({added} stored)."
                 )
+
             else:
                 triples = st.session_state.fact_extractor.extract(text_input)
 
                 if triples:
-                    st.session_state.graph_manager.add_triples(triples)
-                    st.success(f"CarbonSat Fact Graph built: {len(triples)} triples added.")
+                    added = st.session_state.graph_manager.add_triples(triples)
+                    st.success(f"CarbonSat Fact Graph built: {added} triples stored.")
                     with st.expander("Extracted triples"):
                         st.write(triples)
                 else:
-                    st.warning("No triples extracted. Expand domain rules or relation patterns.")
+                    st.warning("No triples extracted. Add more domain patterns or expand your extractor rules.")
 
+    # -----------------------------
+    # Build filtered visualization graph
+    # -----------------------------
     g = st.session_state.graph_manager.get_graph()
     viz = nx.DiGraph()
 
     if graph_mode == "Web Graph":
+        # Use spaCy NER typing from EntityTyper (not lexicon)
         type_map = st.session_state.entity_typer.extract_types_from_text(st.session_state.last_input_text)
 
         for n in g.nodes():
             t = st.session_state.entity_typer.type_for_node(n, type_map)
 
+            # Normalize common spaCy labels to our UI labels
             if t in ("GPE", "FAC"):
                 t = "LOC"
             if t not in show_types:
@@ -158,6 +177,7 @@ with col_graph:
             if show_types.get(t, False):
                 viz.add_node(n, entity_type=t)
     else:
+        # CarbonSat lexicon typing
         for n in g.nodes():
             t = carbonsat_type(n)
             if t not in show_types:
@@ -166,14 +186,17 @@ with col_graph:
                 viz.add_node(n, entity_type=t)
 
     for u, v, data in g.edges(data=True):
-        conf = float(data.get("confidence", 0.30))
+        conf = float(data.get("confidence", data.get("weight", 0.30)))
         if conf < min_conf:
             continue
         if u not in viz.nodes or v not in viz.nodes:
             continue
         viz.add_edge(u, v, **data)
 
-    if viz.number_of_nodes() > 0:
+    # -----------------------------
+    # Render graph
+    # -----------------------------
+    if viz.number_of_nodes() > 0 and viz.number_of_edges() > 0:
         net = Network(height="600px", width="100%", bgcolor="#111111", font_color="white", directed=True)
 
         if graph_mode == "Web Graph":
@@ -204,23 +227,25 @@ with col_graph:
                 label=node,
                 size=12 + degrees.get(node, 0) * 5,
                 color=color_map.get(t, "#B0B0B0"),
-                title=f"type: {t}"
+                title=f"type: {t}",
             )
 
         for u, v, data in viz.edges(data=True):
-            raw_label = data.get("label") or data.get("predicate") or "related"
-            conf = float(data.get("confidence", 0.30))
+            raw_label = str(data.get("label") or data.get("predicate") or "related")
+            conf = float(data.get("confidence", data.get("weight", 0.30)))
             width = 1 + min(6, conf * 6)
 
+            # Hide labels if user wants cleaner look, but keep hover title
             edge_label = raw_label if show_edge_labels else ""
             edge_title = raw_label
 
             net.add_edge(
-                u, v,
+                u,
+                v,
                 label=edge_label,
                 width=width,
                 arrows="to",
-                title=f"{edge_title} (conf {conf:.2f})"
+                title=f"{edge_title} (conf {conf:.2f})",
             )
 
         edge_font_size = 14 if show_edge_labels else 0
@@ -256,9 +281,20 @@ with col_graph:
         with open(output_file, "r", encoding="utf-8") as f:
             components.html(f.read(), height=650)
     else:
-        st.info("Graph is empty (or filtered out). Lower min confidence or enable more types.")
+        if g.number_of_nodes() == 0:
+            st.info("Graph is empty. Paste text and click Build Graph.")
+        else:
+            st.info("Graph was built but filtered out. Lower min confidence or enable more types.")
+            with st.expander("Debug info"):
+                st.write("Stored nodes:", g.number_of_nodes())
+                st.write("Stored edges:", g.number_of_edges())
+                st.write("Shown nodes:", viz.number_of_nodes())
+                st.write("Shown edges:", viz.number_of_edges())
 
 
+# -----------------------------
+# Analytics / exports column
+# -----------------------------
 with col_side:
     st.subheader("Analytics")
 
@@ -290,7 +326,6 @@ with col_side:
     st.divider()
 
     st.markdown("Exports")
-
     json_bytes = graph_to_json_bytes(base_g)
     csv_bytes = graph_to_csv_bytes(base_g)
     top_entities = analytics.top_entities(10) if hasattr(analytics, "top_entities") else []
@@ -299,5 +334,4 @@ with col_side:
     st.download_button("Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
     st.download_button("Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
     st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
-
 
