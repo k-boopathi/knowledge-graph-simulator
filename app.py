@@ -15,11 +15,19 @@ from modules.entity_typer import EntityTyper
 from modules.export_utils import graph_to_json_bytes, graph_to_csv_bytes, graph_to_pdf_bytes
 from modules.cooccurrence_builder import CooccurrenceGraphBuilder
 
+# CarbonSat fact extractor (spaCy + domain gate)
+from modules.spacy_relation_extractor import SpacyRelationExtractor
+from modules.domains.carbonsat.lexicon import CARBONSAT_LEXICON
+
+
+def carbonsat_type(entity: str) -> str:
+    key = (entity or "").strip().lower()
+    return CARBONSAT_LEXICON.get(key, "UNKNOWN")
+
 
 st.set_page_config(page_title="Knowledge Graph Simulator", layout="wide")
 st.title("Knowledge Graph Simulator")
-st.caption("Web Graph • Analytics • Coloring • Export • Filters")
-
+st.caption("Web Graph and CarbonSat Fact Graph. Analytics, coloring, export, filters.")
 
 if "graph_manager" not in st.session_state:
     st.session_state.graph_manager = GraphManager()
@@ -33,12 +41,20 @@ if "co_builder" not in st.session_state:
 if "last_input_text" not in st.session_state:
     st.session_state.last_input_text = ""
 
+if "fact_extractor" not in st.session_state:
+    # Domain mode is the change you requested
+    st.session_state.fact_extractor = SpacyRelationExtractor(domain_mode="carbonsat")
+
 
 with st.sidebar:
     st.header("Controls")
 
-    st.write("Graph Mode: Web Graph")
-    st.caption("Web Graph links entities that co-occur in sentences to form a web-like structure.")
+    graph_mode = st.radio(
+        "Graph Mode",
+        ["Web Graph", "CarbonSat Fact Graph"],
+        index=0,
+        help="Web Graph links co-occurring entities. CarbonSat Fact Graph extracts validated triples for the ESA CarbonSat domain."
+    )
 
     st.divider()
 
@@ -50,13 +66,26 @@ with st.sidebar:
 
     st.divider()
 
-    show_types = {
-        "PERSON": st.checkbox("Show PERSON", True),
-        "ORG": st.checkbox("Show ORG", True),
-        "LOC": st.checkbox("Show LOC", True),
-        "PRODUCT": st.checkbox("Show PRODUCT", True),
-        "UNKNOWN": st.checkbox("Show UNKNOWN", True),
-    }
+    if graph_mode == "Web Graph":
+        show_types = {
+            "PERSON": st.checkbox("Show PERSON", True),
+            "ORG": st.checkbox("Show ORG", True),
+            "LOC": st.checkbox("Show LOC", True),
+            "PRODUCT": st.checkbox("Show PRODUCT", True),
+            "UNKNOWN": st.checkbox("Show UNKNOWN", True),
+        }
+    else:
+        # CarbonSat domain type filters (lexicon-driven)
+        show_types = {
+            "MISSION": st.checkbox("Show MISSION", True),
+            "GAS": st.checkbox("Show GAS", True),
+            "PRODUCT": st.checkbox("Show PRODUCT", True),
+            "ORBIT": st.checkbox("Show ORBIT", True),
+            "PARAMETER": st.checkbox("Show PARAMETER", True),
+            "ORG": st.checkbox("Show ORG", True),
+            "LOC": st.checkbox("Show LOC", True),
+            "UNKNOWN": st.checkbox("Show UNKNOWN", True),
+        }
 
     st.divider()
 
@@ -73,9 +102,14 @@ with col_graph:
     st.subheader("Graph Visualization")
 
     text_input = st.text_area(
-        "Paste any text:",
+        "Paste text:",
         height=230,
-        placeholder="Paste any paragraph. The Web Graph will create a connected graph based on entity co-occurrence."
+        placeholder=(
+            "Example (CarbonSat domain):\n"
+            "CarbonSat measures CO2 and CH4.\n"
+            "CarbonSat produces Level-2 products.\n"
+            "CarbonSat operates in a sun-synchronous orbit.\n"
+        )
     )
 
     if st.button("Build Graph"):
@@ -85,28 +119,48 @@ with col_graph:
             st.session_state.last_input_text = text_input
             st.session_state.graph_manager.reset_graph()
 
-            web_g = st.session_state.co_builder.build(text_input)
+            if graph_mode == "Web Graph":
+                web_g = st.session_state.co_builder.build(text_input)
 
-            edges_for_manager = []
-            for u, v, data in web_g.edges(data=True):
-                label = data.get("label", "co-occurs")
-                confidence = float(data.get("confidence", 0.30))
-                edges_for_manager.append((u, label, v, confidence))
+                edges_for_manager = []
+                for u, v, data in web_g.edges(data=True):
+                    label = data.get("label", "co-occurs")
+                    confidence = float(data.get("confidence", 0.30))
+                    edges_for_manager.append((u, label, v, confidence))
 
-            st.session_state.graph_manager.add_triples(edges_for_manager)
+                st.session_state.graph_manager.add_triples(edges_for_manager)
 
-            st.success(
-                f"Web Graph built: {web_g.number_of_nodes()} entities, {web_g.number_of_edges()} links."
-            )
+                st.success(
+                    f"Web Graph built: {web_g.number_of_nodes()} entities, {web_g.number_of_edges()} links."
+                )
+
+            else:
+                triples = st.session_state.fact_extractor.extract(text_input)  # list of dicts
+
+                if triples:
+                    st.session_state.graph_manager.add_triples(triples)
+                    st.success(f"CarbonSat Fact Graph built: {len(triples)} validated triples added.")
+                    with st.expander("Extracted triples"):
+                        st.write(triples)
+                else:
+                    st.warning("No validated CarbonSat triples extracted. Expand lexicon or relation mapping.")
 
     g = st.session_state.graph_manager.get_graph()
-    type_map = st.session_state.entity_typer.extract_types_from_text(st.session_state.last_input_text)
 
+    # Type assignment for visualization
     viz = nx.DiGraph()
-    for n in g.nodes():
-        t = st.session_state.entity_typer.type_for_node(n, type_map)
-        if show_types.get(t, False):
-            viz.add_node(n, entity_type=t)
+
+    if graph_mode == "Web Graph":
+        type_map = st.session_state.entity_typer.extract_types_from_text(st.session_state.last_input_text)
+        for n in g.nodes():
+            t = st.session_state.entity_typer.type_for_node(n, type_map)
+            if show_types.get(t, False):
+                viz.add_node(n, entity_type=t)
+    else:
+        for n in g.nodes():
+            t = carbonsat_type(n)
+            if show_types.get(t, False):
+                viz.add_node(n, entity_type=t)
 
     for u, v, data in g.edges(data=True):
         conf = float(data.get("confidence", data.get("weight", 0.0)))
@@ -119,13 +173,25 @@ with col_graph:
     if viz.number_of_nodes() > 0:
         net = Network(height="600px", width="100%", bgcolor="#111111", font_color="white", directed=True)
 
-        color_map = {
-            "PERSON": "#4C78A8",
-            "ORG": "#F58518",
-            "LOC": "#54A24B",
-            "PRODUCT": "#E45756",
-            "UNKNOWN": "#B0B0B0",
-        }
+        if graph_mode == "Web Graph":
+            color_map = {
+                "PERSON": "#4C78A8",
+                "ORG": "#F58518",
+                "LOC": "#54A24B",
+                "PRODUCT": "#E45756",
+                "UNKNOWN": "#B0B0B0",
+            }
+        else:
+            color_map = {
+                "MISSION": "#4C78A8",
+                "GAS": "#E45756",
+                "PRODUCT": "#F58518",
+                "ORBIT": "#54A24B",
+                "PARAMETER": "#B279A2",
+                "ORG": "#72B7B2",
+                "LOC": "#59A14F",
+                "UNKNOWN": "#B0B0B0",
+            }
 
         degrees = dict(viz.degree())
         for node, attrs in viz.nodes(data=True):
@@ -196,19 +262,19 @@ with col_side:
     if st.session_state.last_input_text.strip():
         ta = TextAnalytics(st.session_state.last_input_text)
         s = ta.summary()
-        st.markdown("### Text Analytics")
+        st.markdown("Text Analytics")
         st.metric("Characters", s["characters"])
         st.metric("Sentences", s["sentences"])
         st.metric("Words", s["words"])
         st.metric("Tokens", s["tokens"])
         st.metric("Avg sentence length (words)", s["avg_sentence_length_words"])
     else:
-        st.markdown("### Text Analytics")
+        st.markdown("Text Analytics")
         st.write("Paste text and build a graph.")
 
     st.divider()
 
-    st.markdown("### Graph Analytics")
+    st.markdown("Graph Analytics")
     base_g = st.session_state.graph_manager.get_graph()
     analytics = GraphAnalytics(base_g)
 
@@ -220,7 +286,7 @@ with col_side:
 
     st.divider()
 
-    st.markdown("### Exports")
+    st.markdown("Exports")
 
     json_bytes = graph_to_json_bytes(base_g)
     csv_bytes = graph_to_csv_bytes(base_g)
