@@ -1,8 +1,6 @@
 import streamlit as st
 import sys
 import os
-print(os.listdir("modules"))
-print(os.listdir("modules/extractors"))
 import networkx as nx
 from pyvis.network import Network
 import streamlit.components.v1 as components
@@ -17,9 +15,8 @@ from modules.entity_typer import EntityTyper
 from modules.export_utils import graph_to_json_bytes, graph_to_csv_bytes, graph_to_pdf_bytes
 from modules.cooccurrence_builder import CooccurrenceGraphBuilder
 
-# CarbonSat fact extractor (spaCy + domain gate)
 from modules.extractors.spacy_relation_extractor import SpacyRelationExtractor
-from modules.domains.carbonsat.lexicon import CARBONSAT_LEXICON
+from modules.domain.carbonsat.lexicon import CARBONSAT_LEXICON
 
 
 def carbonsat_type(entity: str) -> str:
@@ -44,8 +41,7 @@ if "last_input_text" not in st.session_state:
     st.session_state.last_input_text = ""
 
 if "fact_extractor" not in st.session_state:
-    # Domain mode is the change you requested
-    st.session_state.fact_extractor = SpacyRelationExtractor(domain_mode="carbonsat")
+    st.session_state.fact_extractor = SpacyRelationExtractor()
 
 
 with st.sidebar:
@@ -55,7 +51,7 @@ with st.sidebar:
         "Graph Mode",
         ["Web Graph", "CarbonSat Fact Graph"],
         index=0,
-        help="Web Graph links co-occurring entities. CarbonSat Fact Graph extracts validated triples for the ESA CarbonSat domain."
+        help="Web Graph links co-occurring entities. CarbonSat Fact Graph extracts triples and filters entities using a CarbonSat lexicon."
     )
 
     st.divider()
@@ -77,7 +73,6 @@ with st.sidebar:
             "UNKNOWN": st.checkbox("Show UNKNOWN", True),
         }
     else:
-        # CarbonSat domain type filters (lexicon-driven)
         show_types = {
             "MISSION": st.checkbox("Show MISSION", True),
             "GAS": st.checkbox("Show GAS", True),
@@ -135,37 +130,43 @@ with col_graph:
                 st.success(
                     f"Web Graph built: {web_g.number_of_nodes()} entities, {web_g.number_of_edges()} links."
                 )
-
             else:
-                triples = st.session_state.fact_extractor.extract(text_input)  # list of dicts
+                triples = st.session_state.fact_extractor.extract(text_input)
 
                 if triples:
                     st.session_state.graph_manager.add_triples(triples)
-                    st.success(f"CarbonSat Fact Graph built: {len(triples)} validated triples added.")
+                    st.success(f"CarbonSat Fact Graph built: {len(triples)} triples added.")
                     with st.expander("Extracted triples"):
                         st.write(triples)
                 else:
-                    st.warning("No validated CarbonSat triples extracted. Expand lexicon or relation mapping.")
+                    st.warning("No triples extracted. Expand domain rules or relation patterns.")
 
     g = st.session_state.graph_manager.get_graph()
-
-    # Type assignment for visualization
     viz = nx.DiGraph()
 
     if graph_mode == "Web Graph":
         type_map = st.session_state.entity_typer.extract_types_from_text(st.session_state.last_input_text)
+
         for n in g.nodes():
             t = st.session_state.entity_typer.type_for_node(n, type_map)
+
+            if t in ("GPE", "FAC"):
+                t = "LOC"
+            if t not in show_types:
+                t = "UNKNOWN"
+
             if show_types.get(t, False):
                 viz.add_node(n, entity_type=t)
     else:
         for n in g.nodes():
             t = carbonsat_type(n)
+            if t not in show_types:
+                t = "UNKNOWN"
             if show_types.get(t, False):
                 viz.add_node(n, entity_type=t)
 
     for u, v, data in g.edges(data=True):
-        conf = float(data.get("confidence", data.get("weight", 0.0)))
+        conf = float(data.get("confidence", 0.30))
         if conf < min_conf:
             continue
         if u not in viz.nodes or v not in viz.nodes:
@@ -208,7 +209,7 @@ with col_graph:
 
         for u, v, data in viz.edges(data=True):
             raw_label = data.get("label") or data.get("predicate") or "related"
-            conf = float(data.get("confidence", data.get("weight", 0.30)))
+            conf = float(data.get("confidence", 0.30))
             width = 1 + min(6, conf * 6)
 
             edge_label = raw_label if show_edge_labels else ""
@@ -298,5 +299,4 @@ with col_side:
     st.download_button("Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
     st.download_button("Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
     st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
-
 
