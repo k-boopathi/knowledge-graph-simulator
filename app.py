@@ -16,7 +16,7 @@ from modules.export_utils import graph_to_json_bytes, graph_to_csv_bytes, graph_
 from modules.cooccurrence_builder import CooccurrenceGraphBuilder
 
 # CarbonSat fact extractor (spaCy + domain gate)
-from modules.spacy_relation_extractor import SpacyRelationExtractor
+from modules.extractors.spacy_relation_extractor import SpacyRelationExtractor
 from modules.domains.carbonsat.lexicon import CARBONSAT_LEXICON
 
 
@@ -296,3 +296,4 @@ with col_side:
     st.download_button("Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
     st.download_button("Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
     st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
+
