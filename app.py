@@ -19,7 +19,10 @@ from modules.extractors.spacy_relation_extractor import SpacyRelationExtractor
 from modules.domains.carbonsat.lexicon import CARBONSAT_LEXICON
 
 
-def carbonsat_type(entity: str) -> str:
+# -----------------------------
+# ESA Type Mapper
+# -----------------------------
+def esa_type(entity: str) -> str:
     key = (entity or "").strip().lower()
     key = key.replace("(", " ").replace(")", " ").replace(",", " ")
     key = re.sub(r"\s+", " ", key).strip()
@@ -28,6 +31,7 @@ def carbonsat_type(entity: str) -> str:
     if t:
         return t
 
+    # substring fallback
     for k, v in CARBONSAT_LEXICON.items():
         if k in key:
             return v
@@ -37,7 +41,7 @@ def carbonsat_type(entity: str) -> str:
 
 st.set_page_config(page_title="Knowledge Graph Simulator", layout="wide")
 st.title("Knowledge Graph Simulator")
-st.caption("Web Graph and ESA Relation Graph. Analytics, coloring, export, filters.")
+st.caption("Web Graph and ESA Fact Graph. Analytics, coloring, export, filters.")
 
 # -----------------------------
 # Session state init
@@ -66,45 +70,48 @@ with st.sidebar:
 
     graph_mode = st.radio(
         "Graph Mode",
-        ["Web Graph", "ESA Relation Graph"],
+        ["Web Graph", "ESA Fact Graph"],
         index=0,
-        help="Web Graph links co-occurring entities. ESA Relation Graph extracts subject–predicate–object triples.",
+        help="Web Graph links co-occurring entities. ESA Fact Graph extracts subject–predicate–object triples.",
         key="graph_mode_radio"
     )
 
     st.divider()
 
-    min_conf = st.slider("Min confidence", 0.0, 1.0, 0.20, 0.05, key="min_conf_slider")
-    default_labels = (graph_mode == "ESA Relation Graph")
-    show_edge_labels = st.checkbox("Show edge labels", value=default_labels, key="show_edge_labels")
+    min_conf = st.slider("Min confidence", 0.0, 1.0, 0.20, 0.05)
+    default_labels = (graph_mode == "ESA Fact Graph")
+    show_edge_labels = st.checkbox("Show edge labels", value=default_labels)
 
     st.divider()
 
+    # -----------------------------
+    # Type Filters
+    # -----------------------------
     if graph_mode == "Web Graph":
         show_types = {
-            "PERSON": st.checkbox("Show PERSON", True, key="web_show_person"),
-            "ORG": st.checkbox("Show ORG", True, key="web_show_org"),
-            "LOC": st.checkbox("Show LOC", True, key="web_show_loc"),
-            "PRODUCT": st.checkbox("Show PRODUCT", True, key="web_show_product"),
-            "GAS": st.checkbox("Show GAS", True, key="web_show_gas"),
-            "CONCEPT": st.checkbox("Show CONCEPT", True, key="web_show_concept"),
-            "UNKNOWN": st.checkbox("Show UNKNOWN", True, key="web_show_unknown"),
+            "PERSON": st.checkbox("Show PERSON", True),
+            "ORG": st.checkbox("Show ORG", True),
+            "LOC": st.checkbox("Show LOC", True),
+            "PRODUCT": st.checkbox("Show PRODUCT", True),
+            "GAS": st.checkbox("Show GAS", True),
+            "CONCEPT": st.checkbox("Show CONCEPT", True),
+            "UNKNOWN": st.checkbox("Show UNKNOWN", True),
         }
     else:
         show_types = {
-            "MISSION": st.checkbox("Show MISSION", True, key="esa_show_mission"),
-            "GAS": st.checkbox("Show GAS", True, key="esa_show_gas"),
-            "PRODUCT": st.checkbox("Show PRODUCT", True, key="esa_show_product"),
-            "ORBIT": st.checkbox("Show ORBIT", True, key="esa_show_orbit"),
-            "PARAMETER": st.checkbox("Show PARAMETER", True, key="esa_show_parameter"),
-            "ORG": st.checkbox("Show ORG", True, key="esa_show_org"),
-            "LOC": st.checkbox("Show LOC", True, key="esa_show_loc"),
-            "UNKNOWN": st.checkbox("Show UNKNOWN", True, key="esa_show_unknown"),
+            "MISSION": st.checkbox("Show MISSION", True),
+            "GAS": st.checkbox("Show GAS", True),
+            "PRODUCT": st.checkbox("Show PRODUCT", True),
+            "ORBIT": st.checkbox("Show ORBIT", True),
+            "PARAMETER": st.checkbox("Show PARAMETER", True),
+            "ORG": st.checkbox("Show ORG", True),
+            "LOC": st.checkbox("Show LOC", True),
+            "UNKNOWN": st.checkbox("Show UNKNOWN", True),
         }
 
     st.divider()
 
-    if st.button("Clear Graph", key="clear_graph_button"):
+    if st.button("Clear Graph"):
         st.session_state.graph_manager.reset_graph()
         st.session_state.last_input_text = ""
         st.success("Graph cleared")
@@ -131,16 +138,18 @@ with col_graph:
             "The mission aims to measure atmospheric carbon dioxide and methane.\n"
             "CarbonSat operates in low Earth orbit.\n"
         ),
-        key="text_input_area"
     )
 
-    if st.button("Build Graph", key="build_graph_button"):
+    if st.button("Build Graph"):
         if not text_input.strip():
             st.warning("Please paste some text first.")
         else:
             st.session_state.last_input_text = text_input
             st.session_state.graph_manager.reset_graph()
 
+            # -----------------------------
+            # WEB GRAPH
+            # -----------------------------
             if graph_mode == "Web Graph":
                 web_g = st.session_state.co_builder.build(text_input)
 
@@ -153,45 +162,55 @@ with col_graph:
                 added = st.session_state.graph_manager.add_triples(edges_for_manager)
 
                 st.success(
-                    f"Web Graph built: {web_g.number_of_nodes()} entities, {web_g.number_of_edges()} links "
-                    f"({added} stored)."
+                    f"Web Graph built: {web_g.number_of_nodes()} entities, "
+                    f"{web_g.number_of_edges()} links ({added} stored)."
                 )
 
+            # -----------------------------
+            # ESA FACT GRAPH
+            # -----------------------------
             else:
                 triples = st.session_state.fact_extractor.extract(text_input)
 
                 if triples:
                     added = st.session_state.graph_manager.add_triples(triples)
-                    st.success(f"ESA Relation Graph built: {added} triples stored.")
+                    st.success(f"ESA Fact Graph built: {added} triples stored.")
                     with st.expander("Extracted triples"):
                         st.write(triples)
                 else:
-                    st.warning("No triples extracted. Try adding more rules/patterns.")
+                    st.warning("No triples extracted. Try adding more extraction rules.")
+
 
     # -----------------------------
-    # Build filtered visualization graph
+    # Build filtered graph
     # -----------------------------
     g = st.session_state.graph_manager.get_graph()
     viz = nx.DiGraph()
 
     if graph_mode == "Web Graph":
-        type_map = st.session_state.entity_typer.extract_types_from_text(st.session_state.last_input_text)
+        type_map = st.session_state.entity_typer.extract_types_from_text(
+            st.session_state.last_input_text
+        )
 
         for n in g.nodes():
             t = st.session_state.entity_typer.type_for_node(n, type_map)
 
             if t in ("GPE", "FAC"):
                 t = "LOC"
+
             if t not in show_types:
                 t = "UNKNOWN"
 
             if show_types.get(t, False):
                 viz.add_node(n, entity_type=t)
+
     else:
         for n in g.nodes():
-            t = carbonsat_type(n)  # you can rename this later if you move to ESA lexicon
+            t = esa_type(n)
+
             if t not in show_types:
                 t = "UNKNOWN"
+
             if show_types.get(t, False):
                 viz.add_node(n, entity_type=t)
 
@@ -204,10 +223,12 @@ with col_graph:
         viz.add_edge(u, v, **data)
 
     # -----------------------------
-    # Render graph
+    # Render Graph
     # -----------------------------
     if viz.number_of_nodes() > 0 and viz.number_of_edges() > 0:
-        net = Network(height="600px", width="100%", bgcolor="#111111", font_color="white", directed=True)
+
+        net = Network(height="600px", width="100%", bgcolor="#111111",
+                      font_color="white", directed=True)
 
         if graph_mode == "Web Graph":
             color_map = {
@@ -232,6 +253,7 @@ with col_graph:
             }
 
         degrees = dict(viz.degree())
+
         for node, attrs in viz.nodes(data=True):
             t = attrs.get("entity_type", "UNKNOWN")
             net.add_node(
@@ -247,104 +269,50 @@ with col_graph:
             conf = float(data.get("confidence", data.get("weight", 0.30)))
             width = 1 + min(6, conf * 6)
 
-            edge_label = raw_label if show_edge_labels else ""
-            edge_title = raw_label
-
             net.add_edge(
                 u,
                 v,
-                label=edge_label,
+                label=raw_label if show_edge_labels else "",
                 width=width,
                 arrows="to",
-                title=f"{edge_title} (conf {conf:.2f})",
+                title=f"{raw_label} (conf {conf:.2f})",
             )
 
-        edge_font_size = 14 if show_edge_labels else 0
-        node_font_size = 18
-
-        net.set_options(f"""
-{{
-  "physics": {{
-    "enabled": true,
-    "solver": "forceAtlas2Based",
-    "forceAtlas2Based": {{
-      "gravitationalConstant": -90,
-      "centralGravity": 0.03,
-      "springLength": 160,
-      "springConstant": 0.06,
-      "avoidOverlap": 1
-    }},
-    "stabilization": {{ "enabled": true, "iterations": 1400 }}
-  }},
-  "edges": {{
-    "smooth": {{ "enabled": true, "type": "dynamic" }},
-    "font": {{ "size": {edge_font_size}, "align": "middle" }}
-  }},
-  "nodes": {{
-    "shape": "dot",
-    "font": {{ "size": {node_font_size} }}
-  }}
-}}
-""")
+        net.set_options("""
+        {
+          "physics": {
+            "enabled": true,
+            "solver": "forceAtlas2Based"
+          }
+        }
+        """)
 
         output_file = os.path.join(BASE_DIR, "graph_output.html")
         net.save_graph(output_file)
+
         with open(output_file, "r", encoding="utf-8") as f:
             components.html(f.read(), height=650)
+
     else:
-        if g.number_of_nodes() == 0:
-            st.info("Graph is empty. Paste text and click Build Graph.")
-        else:
-            st.info("Graph was built but filtered out. Lower min confidence or enable more types.")
-            with st.expander("Debug info"):
-                st.write("Stored nodes:", g.number_of_nodes())
-                st.write("Stored edges:", g.number_of_edges())
-                st.write("Shown nodes:", viz.number_of_nodes())
-                st.write("Shown edges:", viz.number_of_edges())
+        st.info("Graph is empty or filtered out.")
 
 
 # -----------------------------
-# Analytics / exports column
+# Analytics
 # -----------------------------
 with col_side:
     st.subheader("Analytics")
 
-    if st.session_state.last_input_text.strip():
-        ta = TextAnalytics(st.session_state.last_input_text)
-        s = ta.summary()
-        st.markdown("Text Analytics")
-        st.metric("Characters", s["characters"])
-        st.metric("Sentences", s["sentences"])
-        st.metric("Words", s["words"])
-        st.metric("Tokens", s["tokens"])
-        st.metric("Avg sentence length (words)", s["avg_sentence_length_words"])
-    else:
-        st.markdown("Text Analytics")
-        st.write("Paste text and build a graph.")
-
-    st.divider()
-
-    st.markdown("Graph Analytics")
     base_g = st.session_state.graph_manager.get_graph()
     analytics = GraphAnalytics(base_g)
 
     st.metric("Nodes", analytics.node_count())
     st.metric("Edges", analytics.edge_count())
     st.metric("Density", round(analytics.density(), 4))
-    cc = nx.number_weakly_connected_components(base_g) if base_g.number_of_nodes() else 0
-    st.metric("Connected Components", cc)
 
     st.divider()
 
-    st.markdown("Exports")
-    json_bytes = graph_to_json_bytes(base_g)
-    csv_bytes = graph_to_csv_bytes(base_g)
-    top_entities = analytics.top_entities(10) if hasattr(analytics, "top_entities") else []
-    pdf_bytes = graph_to_pdf_bytes(base_g, title="Knowledge Graph Report", top_entities=top_entities)
-
-    st.download_button("Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
-    st.download_button("Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
-    st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
-
-
-
+    st.subheader("Exports")
+    st.download_button("Download JSON",
+                       graph_to_json_bytes(base_g),
+                       "graph.json")
