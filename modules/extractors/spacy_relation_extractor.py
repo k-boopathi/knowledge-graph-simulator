@@ -129,23 +129,23 @@ class SpacyRelationExtractor:
         return self._dedupe(out)
 
     def _type_from_lexicon(self, entity: str) -> str:
-    key = (entity or "").strip().lower()
+        key = (entity or "").strip().lower()
 
-    # normalize common punctuation
-    key = key.replace("(", " ").replace(")", " ").replace(",", " ")
-    key = " ".join(key.split())
+        # normalize common punctuation
+        key = key.replace("(", " ").replace(")", " ").replace(",", " ")
+        key = " ".join(key.split())
 
-    # try full match first
-    t = CARBONSAT_LEXICON.get(key)
-    if t:
-        return t
+        # try full match first
+        t = CARBONSAT_LEXICON.get(key)
+        if t:
+            return t
 
-    # fallback: if phrase contains a known key (substring match)
-    for k, v in CARBONSAT_LEXICON.items():
-        if k in key:
-            return v
+        # fallback: if phrase contains a known key (substring match)
+        for k, v in CARBONSAT_LEXICON.items():
+            if k in key:
+                return v
 
-    return "UNKNOWN"
+        return "UNKNOWN"
 
     def _dedupe(self, triples: List[Triple]) -> List[Triple]:
         uniq = {}
