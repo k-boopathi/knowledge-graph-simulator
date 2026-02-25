@@ -11,11 +11,14 @@ class CarbonSatRelationMapper:
         # key domain relations
         if "measure" in r or "monitor" in r:
             return "measures"
-
+            
+        if "use" in r or "include" in r or "carry" in r:
+            return "uses"
+        
         if "detect" in r or "retrieve" in r or "observe" in r:
             return "detects"
 
-        if "produce" in r or "generate" in r or "deliver" in r:
+        if "produce" in r or "generate" in r or "deliver" in r or "provide" in r:
             return "produces"
 
         if "operate" in r or "fly" in r:
