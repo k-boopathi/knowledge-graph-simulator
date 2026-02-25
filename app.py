@@ -63,7 +63,8 @@ with st.sidebar:
     st.divider()
 
     min_conf = st.slider("Min confidence", 0.0, 1.0, 0.20, 0.05, key="min_conf_slider")
-    show_edge_labels = st.checkbox("Show edge labels", value=False, key="show_edge_labels_checkbox")
+    default_labels = (graph_mode == "CarbonSat Fact Graph")
+    show_edge_labels = st.checkbox("Show edge labels", value=default_labels, key="show_edge_labels")
 
     st.divider()
 
@@ -329,4 +330,5 @@ with col_side:
     st.download_button("Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
     st.download_button("Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
     st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
+
 
