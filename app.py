@@ -28,7 +28,6 @@ def carbonsat_type(entity: str) -> str:
     if t:
         return t
 
-    # substring fallback (same idea as extractor)
     for k, v in CARBONSAT_LEXICON.items():
         if k in key:
             return v
@@ -38,7 +37,7 @@ def carbonsat_type(entity: str) -> str:
 
 st.set_page_config(page_title="Knowledge Graph Simulator", layout="wide")
 st.title("Knowledge Graph Simulator")
-st.caption("Web Graph and CarbonSat Fact Graph. Analytics, coloring, export, filters.")
+st.caption("Web Graph and ESA Relation Graph. Analytics, coloring, export, filters.")
 
 # -----------------------------
 # Session state init
@@ -67,21 +66,20 @@ with st.sidebar:
 
     graph_mode = st.radio(
         "Graph Mode",
-        ["Web Graph", "CarbonSat Fact Graph"],
+        ["Web Graph", "ESA Relation Graph"],
         index=0,
-        help="Web Graph links co-occurring entities. CarbonSat Fact Graph extracts triples and applies CarbonSat typing.",
+        help="Web Graph links co-occurring entities. ESA Relation Graph extracts subject–predicate–object triples.",
         key="graph_mode_radio"
     )
 
     st.divider()
 
     min_conf = st.slider("Min confidence", 0.0, 1.0, 0.20, 0.05, key="min_conf_slider")
-    default_labels = (graph_mode == "CarbonSat Fact Graph")
+    default_labels = (graph_mode == "ESA Relation Graph")
     show_edge_labels = st.checkbox("Show edge labels", value=default_labels, key="show_edge_labels")
 
     st.divider()
 
-    # IMPORTANT: unique keys for all checkboxes
     if graph_mode == "Web Graph":
         show_types = {
             "PERSON": st.checkbox("Show PERSON", True, key="web_show_person"),
@@ -91,18 +89,17 @@ with st.sidebar:
             "GAS": st.checkbox("Show GAS", True, key="web_show_gas"),
             "CONCEPT": st.checkbox("Show CONCEPT", True, key="web_show_concept"),
             "UNKNOWN": st.checkbox("Show UNKNOWN", True, key="web_show_unknown"),
-        
         }
     else:
         show_types = {
-            "MISSION": st.checkbox("Show MISSION", True, key="cs_show_mission"),
-            "GAS": st.checkbox("Show GAS", True, key="cs_show_gas"),
-            "PRODUCT": st.checkbox("Show PRODUCT", True, key="cs_show_product"),
-            "ORBIT": st.checkbox("Show ORBIT", True, key="cs_show_orbit"),
-            "PARAMETER": st.checkbox("Show PARAMETER", True, key="cs_show_parameter"),
-            "ORG": st.checkbox("Show ORG", True, key="cs_show_org"),
-            "LOC": st.checkbox("Show LOC", True, key="cs_show_loc"),
-            "UNKNOWN": st.checkbox("Show UNKNOWN", True, key="cs_show_unknown"),
+            "MISSION": st.checkbox("Show MISSION", True, key="esa_show_mission"),
+            "GAS": st.checkbox("Show GAS", True, key="esa_show_gas"),
+            "PRODUCT": st.checkbox("Show PRODUCT", True, key="esa_show_product"),
+            "ORBIT": st.checkbox("Show ORBIT", True, key="esa_show_orbit"),
+            "PARAMETER": st.checkbox("Show PARAMETER", True, key="esa_show_parameter"),
+            "ORG": st.checkbox("Show ORG", True, key="esa_show_org"),
+            "LOC": st.checkbox("Show LOC", True, key="esa_show_loc"),
+            "UNKNOWN": st.checkbox("Show UNKNOWN", True, key="esa_show_unknown"),
         }
 
     st.divider()
@@ -165,11 +162,11 @@ with col_graph:
 
                 if triples:
                     added = st.session_state.graph_manager.add_triples(triples)
-                    st.success(f"CarbonSat Fact Graph built: {added} triples stored.")
+                    st.success(f"ESA Relation Graph built: {added} triples stored.")
                     with st.expander("Extracted triples"):
                         st.write(triples)
                 else:
-                    st.warning("No triples extracted. Add more domain patterns or expand your extractor rules.")
+                    st.warning("No triples extracted. Try adding more rules/patterns.")
 
     # -----------------------------
     # Build filtered visualization graph
@@ -192,7 +189,7 @@ with col_graph:
                 viz.add_node(n, entity_type=t)
     else:
         for n in g.nodes():
-            t = carbonsat_type(n)
+            t = carbonsat_type(n)  # you can rename this later if you move to ESA lexicon
             if t not in show_types:
                 t = "UNKNOWN"
             if show_types.get(t, False):
@@ -218,17 +215,17 @@ with col_graph:
                 "ORG": "#F58518",
                 "LOC": "#54A24B",
                 "PRODUCT": "#E45756",
+                "GAS": "#E45756",
+                "CONCEPT": "#B279A2",
                 "UNKNOWN": "#B0B0B0",
             }
         else:
             color_map = {
-                "PERSON": "#4C78A8",
                 "MISSION": "#4C78A8",
                 "GAS": "#E45756",
                 "PRODUCT": "#F58518",
                 "ORBIT": "#54A24B",
                 "PARAMETER": "#B279A2",
-                "CONCEPT": "#B279A2",
                 "ORG": "#72B7B2",
                 "LOC": "#59A14F",
                 "UNKNOWN": "#B0B0B0",
@@ -348,8 +345,6 @@ with col_side:
     st.download_button("Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
     st.download_button("Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
     st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
-
-
 
 
 
