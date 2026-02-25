@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import streamlit as st
 import networkx as nx
@@ -20,7 +21,19 @@ from modules.domains.carbonsat.lexicon import CARBONSAT_LEXICON
 
 def carbonsat_type(entity: str) -> str:
     key = (entity or "").strip().lower()
-    return CARBONSAT_LEXICON.get(key, "UNKNOWN")
+    key = key.replace("(", " ").replace(")", " ").replace(",", " ")
+    key = re.sub(r"\s+", " ", key).strip()
+
+    t = CARBONSAT_LEXICON.get(key)
+    if t:
+        return t
+
+    # substring fallback (same idea as extractor)
+    for k, v in CARBONSAT_LEXICON.items():
+        if k in key:
+            return v
+
+    return "UNKNOWN"
 
 
 st.set_page_config(page_title="Knowledge Graph Simulator", layout="wide")
@@ -330,5 +343,6 @@ with col_side:
     st.download_button("Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
     st.download_button("Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
     st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
+
 
 
