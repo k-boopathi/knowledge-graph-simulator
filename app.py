@@ -91,7 +91,7 @@ with st.sidebar:
             "GAS": st.checkbox("Show GAS", True, key="web_show_gas"),
             "CONCEPT": st.checkbox("Show CONCEPT", True, key="web_show_concept"),
             "UNKNOWN": st.checkbox("Show UNKNOWN", True, key="web_show_unknown"),
-}
+        
         }
     else:
         show_types = {
@@ -348,6 +348,7 @@ with col_side:
     st.download_button("Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
     st.download_button("Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
     st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
+
 
 
 
