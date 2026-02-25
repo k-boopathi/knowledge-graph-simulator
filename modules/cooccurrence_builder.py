@@ -73,7 +73,7 @@ class CooccurrenceGraphBuilder:
             # Single directed edge to reduce visual clutter
             # Direction chosen by node degree later in visualization, so here just a -> b
             g.add_edge(a, b, label="", predicate="co-occurs", confidence=min(1.0, 0.2 + w * 0.15), weight=w)
-g.add_edge(b, a, label="", predicate="co-occurs", confidence=min(1.0, 0.2 + w * 0.15), weight=w)
+
 
         return g
 
@@ -128,4 +128,5 @@ g.add_edge(b, a, label="", predicate="co-occurs", confidence=min(1.0, 0.2 + w * 
         # Confidence grows with frequency but saturates
         # count 1 -> 0.35, count 2 -> 0.50, count 3 -> 0.62, etc.
         return max(0.20, min(1.0, 0.20 + (1.0 - 0.20) * (1 - (0.70 ** w))))
+
 
