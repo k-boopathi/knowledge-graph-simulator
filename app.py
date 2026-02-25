@@ -88,7 +88,10 @@ with st.sidebar:
             "ORG": st.checkbox("Show ORG", True, key="web_show_org"),
             "LOC": st.checkbox("Show LOC", True, key="web_show_loc"),
             "PRODUCT": st.checkbox("Show PRODUCT", True, key="web_show_product"),
+            "GAS": st.checkbox("Show GAS", True, key="web_show_gas"),
+            "CONCEPT": st.checkbox("Show CONCEPT", True, key="web_show_concept"),
             "UNKNOWN": st.checkbox("Show UNKNOWN", True, key="web_show_unknown"),
+}
         }
     else:
         show_types = {
@@ -219,11 +222,13 @@ with col_graph:
             }
         else:
             color_map = {
+                "PERSON": "#4C78A8",
                 "MISSION": "#4C78A8",
                 "GAS": "#E45756",
                 "PRODUCT": "#F58518",
                 "ORBIT": "#54A24B",
                 "PARAMETER": "#B279A2",
+                "CONCEPT": "#B279A2",
                 "ORG": "#72B7B2",
                 "LOC": "#59A14F",
                 "UNKNOWN": "#B0B0B0",
@@ -343,6 +348,7 @@ with col_side:
     st.download_button("Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
     st.download_button("Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
     st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
+
 
 
 
