@@ -18,6 +18,9 @@ CARBONSAT_LEXICON = {
     "level-2": "PRODUCT",
     "l1": "PRODUCT",
     "l2": "PRODUCT",
+    "level-2 products": "PRODUCT",
+    "level 2 products": "PRODUCT",
+    
 
     # Orbit terms
     "orbit": "ORBIT",
