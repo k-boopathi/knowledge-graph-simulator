@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from typing import Dict, Tuple, List, Set
+from typing import Dict, Tuple, List
 from collections import defaultdict
 import re
 import spacy
 import networkx as nx
-from spacy.pipeline import EntityRuler
 
 
 class CooccurrenceGraphBuilder:
@@ -13,20 +12,26 @@ class CooccurrenceGraphBuilder:
     Web (co-occurrence) graph for general text + ESA/scientific content.
 
     Improvements:
-    - Adds EntityRuler patterns for domain terms (CO2/CH4/IPCC, etc.)
-    - Adds noun-chunk concepts to avoid "empty graph" on scientific paragraphs
-    - Normalizes CO₂/CH₄ and splits "CO2 and CH4" into separate nodes
-    - Keeps your sentence-based co-occurrence + clique control
+    - Adds a named EntityRuler (esa_entity_ruler) for domain terms (CO2/CH4/IPCC, orbit terms, levels, etc.)
+    - Clears patterns on init to avoid duplication in Streamlit reloads
+    - Adds noun-chunk concepts (optional) to avoid "empty graph" on scientific paragraphs
+    - Normalizes CO₂/CH₄ and splits simple "A and B" entities conservatively
+    - Sentence-based co-occurrence + clique control
     """
 
     def __init__(self, model: str = "en_core_web_sm", enable_noun_chunks: bool = True):
         self.nlp = spacy.load(model)
         self.enable_noun_chunks = enable_noun_chunks
 
-        # --- Add an EntityRuler BEFORE ner to boost scientific/domain entities ---
-        if "entity_ruler" not in self.nlp.pipe_names:
-            ruler = self.nlp.add_pipe("entity_ruler", before="ner")
-            ruler.add_patterns(self._domain_patterns())
+        # --- Add or reuse ESA EntityRuler (named) BEFORE ner ---
+        if "esa_entity_ruler" in self.nlp.pipe_names:
+            ruler = self.nlp.get_pipe("esa_entity_ruler")
+        else:
+            ruler = self.nlp.add_pipe("entity_ruler", name="esa_entity_ruler", before="ner")
+
+        # Clear to avoid duplicate patterns (Streamlit reruns / multiple instances)
+        ruler.clear()
+        ruler.add_patterns(self._domain_patterns())
 
         # What entity labels we keep as nodes
         self.allowed_labels = {
@@ -59,7 +64,10 @@ class CooccurrenceGraphBuilder:
         text: str,
         min_count: int = 1,
         max_edges_per_sentence: int = 12
-    ) -> nx.DiGraph:
+    ) -> nx.Graph:
+        """
+        Build an undirected co-occurrence graph (more correct for co-occurrence).
+        """
         doc = self.nlp(text)
 
         pair_counts: Dict[Tuple[str, str], int] = defaultdict(int)
@@ -68,8 +76,7 @@ class CooccurrenceGraphBuilder:
         for sent in doc.sents:
             sent_entities = self._entities_from_sentence(sent, node_types)
 
-            # Reduce clique explosion: if too many entities in one sentence,
-            # keep the "strongest" by length heuristic
+            # Reduce clique explosion if too many entities in one sentence
             if len(sent_entities) > max_edges_per_sentence:
                 sent_entities = sorted(sent_entities, key=len, reverse=True)[:max_edges_per_sentence]
 
@@ -85,7 +92,7 @@ class CooccurrenceGraphBuilder:
                     key = tuple(sorted((a, b)))
                     pair_counts[key] += 1
 
-        g = nx.DiGraph()
+        g = nx.Graph()
 
         for node, t in node_types.items():
             g.add_node(node, entity_type=t)
@@ -96,7 +103,6 @@ class CooccurrenceGraphBuilder:
 
             conf = self._confidence_from_count(w)
 
-            # One directed edge (to reduce clutter)
             g.add_edge(
                 a, b,
                 label="",
@@ -124,10 +130,11 @@ class CooccurrenceGraphBuilder:
                 node_types.setdefault(name, label)
                 names.append(name)
 
-        # 2) Add noun chunks as CONCEPT nodes (optional but very useful for scientific text)
+        # 2) Add noun chunks as CONCEPT nodes (optional)
         if self.enable_noun_chunks:
+            existing_nodes = set(node_types.keys())
+
             for chunk in sent.noun_chunks:
-                # avoid making concepts out of pronouns etc.
                 if any(tok.pos_ == "PRON" for tok in chunk):
                     continue
 
@@ -142,15 +149,19 @@ class CooccurrenceGraphBuilder:
                 low = phrase.lower()
                 if low in self.entity_stop:
                     continue
-
-                # skip trivial chunks
                 if low in self.chunk_stop:
                     continue
 
-                # don't duplicate if already captured by NER
-                if phrase not in node_types:
-                    node_types.setdefault(phrase, "CONCEPT")
-                    names.append(phrase)
+                # Skip if already captured
+                if phrase in existing_nodes:
+                    continue
+
+                # Skip if phrase is inside an existing entity span (avoid overlap noise)
+                if any(phrase in e for e in existing_nodes):
+                    continue
+
+                node_types.setdefault(phrase, "CONCEPT")
+                names.append(phrase)
 
         return names
 
@@ -166,17 +177,18 @@ class CooccurrenceGraphBuilder:
         # Normalize CO₂/CH₄ to CO2/CH4
         s = s.replace("CO₂", "CO2").replace("CH₄", "CH4")
 
-        # Split very simple "A and B" for common gas patterns
-        # (keep conservative to avoid exploding phrases)
+        # Conservative split on 'and'
         low = s.lower()
-        if " and " in low:
+        if re.search(r"\band\b", low):
             parts = [p.strip() for p in re.split(r"\band\b", s, flags=re.I)]
-            cleaned = []
+            cleaned: List[str] = []
+
             for p in parts:
                 p = self._normalize_entity(p)
                 if p:
                     cleaned.append(p)
-            # if it becomes multiple short parts, return them
+
+            # only split if it yields a small number of short parts
             if 1 < len(cleaned) <= 3 and all(len(x.split()) <= 4 for x in cleaned):
                 return cleaned
 
@@ -222,20 +234,53 @@ class CooccurrenceGraphBuilder:
         Add more patterns as you discover missing terms.
         """
         return [
-            # Gases (match CO2/CH4 with or without subscripts)
+            # ---------------------------
+            # Gases
+            # ---------------------------
             {"label": "GAS", "pattern": [{"LOWER": {"IN": ["co2", "ch4"]}}]},
             {"label": "GAS", "pattern": "CO₂"},
             {"label": "GAS", "pattern": "CH₄"},
             {"label": "GAS", "pattern": "carbon dioxide"},
             {"label": "GAS", "pattern": "methane"},
 
-            # Climate orgs
+            # ---------------------------
+            # Climate orgs / ESA orgs
+            # ---------------------------
             {"label": "ORG", "pattern": "Intergovernmental Panel on Climate Change"},
             {"label": "ORG", "pattern": "IPCC"},
             {"label": "ORG", "pattern": "European Space Agency"},
             {"label": "ORG", "pattern": "ESA"},
 
-            # Key concepts that spaCy NER usually misses
+            # ---------------------------
+            # Orbit concepts
+            # ---------------------------
+            {"label": "CONCEPT", "pattern": "sun-synchronous orbit"},
+            {"label": "CONCEPT", "pattern": "low Earth orbit"},
+            {"label": "CONCEPT", "pattern": "near-polar orbit"},
+
+            # ---------------------------
+            # Mission concepts
+            # ---------------------------
+            {"label": "CONCEPT", "pattern": "Earth observation mission"},
+            {"label": "CONCEPT", "pattern": "satellite mission"},
+
+            # ---------------------------
+            # Instruments / payload terms
+            # ---------------------------
+            {"label": "PRODUCT", "pattern": "imaging spectrometer"},
+            {"label": "PRODUCT", "pattern": "spectrometer"},
+
+            # ---------------------------
+            # Data levels
+            # ---------------------------
+            {"label": "PRODUCT", "pattern": "Level-1"},
+            {"label": "PRODUCT", "pattern": "Level-2"},
+            {"label": "PRODUCT", "pattern": "Level 1"},
+            {"label": "PRODUCT", "pattern": "Level 2"},
+
+            # ---------------------------
+            # Concepts often missed by NER
+            # ---------------------------
             {"label": "CONCEPT", "pattern": "human activity"},
             {"label": "CONCEPT", "pattern": "sources and sinks"},
             {"label": "CONCEPT", "pattern": "carbon cycle"},
