@@ -15,7 +15,7 @@ class CooccurrenceGraphBuilder:
     - Adds a named EntityRuler (esa_entity_ruler) for domain terms (CO2/CH4/IPCC, orbit terms, levels, etc.)
     - Clears patterns on init to avoid duplication in Streamlit reloads
     - Adds noun-chunk concepts (optional) to avoid "empty graph" on scientific paragraphs
-    - Normalizes CO₂/CH₄ and splits simple "A and B" entities conservatively
+    - General unicode subscript normalization (₂ -> 2, etc.) to avoid duplicate nodes
     - Sentence-based co-occurrence + clique control
     """
 
@@ -34,37 +34,46 @@ class CooccurrenceGraphBuilder:
         ruler.add_patterns(self._domain_patterns())
 
         # What entity labels we keep as nodes
-        self.allowed_labels = {
-            "PERSON", "ORG", "GPE", "LOC", "PRODUCT",
-            "GAS", "CONCEPT"
-        }
+        self.allowed_labels = {"PERSON", "ORG", "GPE", "LOC", "PRODUCT", "GAS", "CONCEPT"}
 
         # Map spaCy labels to our display labels
-        self.label_map = {
-            "GPE": "LOC",
-            "LOC": "LOC",
-        }
+        self.label_map = {"GPE": "LOC", "LOC": "LOC"}
 
         # Stoplist to reduce junk nodes
         self.entity_stop = {
-            "the company", "the government", "the world", "the state", "the university",
-            "company", "government", "university",
-            "this", "that", "these", "those",
-            "it", "its", "their", "they",
+            "the company",
+            "the government",
+            "the world",
+            "the state",
+            "the university",
+            "company",
+            "government",
+            "university",
+            "this",
+            "that",
+            "these",
+            "those",
+            "it",
+            "its",
+            "their",
+            "they",
         }
 
         # Extra stop words for noun chunks (to reduce noise)
         self.chunk_stop = {
-            "one", "two", "three", "many", "most", "some",
-            "important", "significant", "recent", "future",
+            "one",
+            "two",
+            "three",
+            "many",
+            "most",
+            "some",
+            "important",
+            "significant",
+            "recent",
+            "future",
         }
 
-    def build(
-        self,
-        text: str,
-        min_count: int = 1,
-        max_edges_per_sentence: int = 12
-    ) -> nx.Graph:
+    def build(self, text: str, min_count: int = 1, max_edges_per_sentence: int = 12) -> nx.Graph:
         """
         Build an undirected co-occurrence graph (more correct for co-occurrence).
         """
@@ -102,14 +111,7 @@ class CooccurrenceGraphBuilder:
                 continue
 
             conf = self._confidence_from_count(w)
-
-            g.add_edge(
-                a, b,
-                label="",
-                predicate="co-occurs",
-                confidence=conf,
-                weight=w
-            )
+            g.add_edge(a, b, label="", predicate="co-occurs", confidence=conf, weight=w)
 
         return g
 
@@ -174,9 +176,6 @@ class CooccurrenceGraphBuilder:
         if not s:
             return []
 
-        # Normalize CO₂/CH₄ to CO2/CH4
-        s = s.replace("CO₂", "CO2").replace("CH₄", "CH4")
-
         # Conservative split on 'and'
         low = s.lower()
         if re.search(r"\band\b", low):
@@ -199,6 +198,28 @@ class CooccurrenceGraphBuilder:
         if not s:
             return ""
 
+        # --- General unicode subscript normalization (₂ -> 2, ₄ -> 4, etc.) ---
+        sub_map = str.maketrans(
+            {
+                "₀": "0",
+                "₁": "1",
+                "₂": "2",
+                "₃": "3",
+                "₄": "4",
+                "₅": "5",
+                "₆": "6",
+                "₇": "7",
+                "₈": "8",
+                "₉": "9",
+                "₊": "+",
+                "₋": "-",
+                "₌": "=",
+                "₍": "(",
+                "₎": ")",
+            }
+        )
+        s = s.translate(sub_map)
+
         s = s.strip("\"'`")
         s = re.sub(r"\s+", " ", s)
         s = re.sub(r"[,\.;:\)\]]+$", "", s).strip()
@@ -209,6 +230,11 @@ class CooccurrenceGraphBuilder:
         # Normalize common suffix punctuation
         s = s.replace("Inc.", "Inc").replace("Co.", "Co").replace("Ltd.", "Ltd")
 
+        # Canonicalize common chemical formulas to uppercase when they are short tokens
+        # e.g., "Co2" -> "CO2", "Ch4" -> "CH4", "O3" -> "O3"
+        if re.fullmatch(r"[A-Za-z]{1,3}\d{0,3}", s):
+            s = s.upper()
+
         # Keep acronyms but title-case regular words lightly
         if len(s) > 1 and not s.isupper():
             s = " ".join([w if w.isupper() else w[:1].upper() + w[1:] for w in s.split()])
@@ -218,7 +244,7 @@ class CooccurrenceGraphBuilder:
             r"\b(inc|ltd|co|corp|corporation|company)\b",
             lambda m: m.group(1).lower(),
             s,
-            flags=re.I
+            flags=re.I,
         )
         s = re.sub(r"\s+", " ", s).strip()
 
@@ -226,7 +252,7 @@ class CooccurrenceGraphBuilder:
 
     def _confidence_from_count(self, w: int) -> float:
         # Confidence grows with frequency but saturates
-        return max(0.20, min(1.0, 0.20 + (1.0 - 0.20) * (1 - (0.70 ** w))))
+        return max(0.20, min(1.0, 0.20 + (1.0 - 0.20) * (1 - (0.70**w))))
 
     def _domain_patterns(self) -> List[dict]:
         """
