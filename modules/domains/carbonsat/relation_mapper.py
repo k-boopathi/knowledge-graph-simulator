@@ -5,28 +5,33 @@ class CarbonSatRelationMapper:
 
         r = text_relation.lower().strip()
 
-        if any(w in r for w in ["measure", "measures", "measuring", "observe", "observes", "detect", "detects"]):
+        # normalize common variants
+        r = r.replace("-", " ")
+
+        # key domain relations
+        if "measure" in r or "monitor" in r:
             return "measures"
 
-        if any(w in r for w in ["produce", "produces", "generate", "generates", "provide", "provides"]):
+        if "detect" in r or "retrieve" in r or "observe" in r:
+            return "detects"
+
+        if "produce" in r or "generate" in r or "deliver" in r:
             return "produces"
 
-        if any(w in r for w in ["carry", "carries", "equipped", "instrument", "payload"]):
-            return "has_instrument"
+        if "operate" in r or "fly" in r:
+            return "operates_in"
 
         if "orbit" in r:
-            return "has_orbit"
+            return "operates_in"
 
-        if "swath" in r:
-            return "has_swath"
+        if "develop" in r or "propose" in r or "lead" in r:
+            return "developed_by"
 
-        if "resolution" in r:
-            return "has_resolution"
+        if "design" in r or "build" in r:
+            return "built_by"
 
-        if any(w in r for w in ["cover", "covers"]):
-            return "covers"
+        if "part of" in r or "programme" in r or "program" in r:
+            return "part_of"
 
-        if any(w in r for w in ["operated", "operate", "managed"]):
-            return "operated_by"
-
+        # fallback: nothing mapped
         return None
