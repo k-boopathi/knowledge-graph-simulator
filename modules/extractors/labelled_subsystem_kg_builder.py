@@ -285,9 +285,15 @@ class LabelledSubsystemKGBuilder:
     # Normalization
     # -----------------------------
     def canon(self, s: str) -> str:
-        x = (s or "").strip()
-        if not x:
-            return ""
+        x = re.sub(r"\s+", " ", x)
+        x = x.strip(" ,.;:()[]{}\"'")
+        x = re.sub(r"^(the|a|an)\s+", "", x, flags=re.I)
+
+    # ignore very short junk
+       if len(x) < 3:
+           return ""
+
+       return x
 
         # normalize unicode subscripts like CO₂ -> CO2
         sub_map = str.maketrans({
