@@ -20,105 +20,151 @@ class LabeledSpan:
     confidence: float = 0.60
 
 
-# -----------------------------
-# Builder
-# -----------------------------
 class LabelledSubsystemKGBuilder:
     """
-    Labelled Subsystem KG Builder.
+    Mission-focused labelled KG builder (demo-safe).
 
-    Goal:
-      - Extract candidate spans (noun phrases + key terms)
-      - Assign each span a subsystem label (TELECOM/POWER/DATA/etc.)
-      - Connect spans that co-occur in the same sentence
+    What it does:
+      1) Extracts mission-relevant spans (mission name, objectives, measurements, region/orbit terms, etc.)
+      2) Assigns each span a label using a mission-first taxonomy:
+         - MISSION, PROGRAMME, SCIENCE_OBJECTIVE, MEASUREMENT, TARGET_REGION, MODELING, CONCEPT
+         - SUBSYSTEM_* labels when strongly indicated (TELECOM, POWER, DATA, PAYLOAD, etc.)
+      3) Connects spans that co-occur within the same sentence
 
-    Demo-safe:
-      - Works without a fine-tuned model (uses lexicon fallback).
-      - Later, replace `label_span()` with SpaceBERT inference.
+    This works WITHOUT a fine-tuned SpaceBERT.
+    Later, you can replace label_span() with SpaceBERT inference.
     """
 
     def __init__(
         self,
         spacy_model: str = "en_core_web_sm",
         enable_noun_chunks: bool = True,
-        enable_entities: bool = True,
-        max_chunk_words: int = 6,
-        min_node_chars: int = 3,
+        mission_mode: bool = True,
     ):
-        # Keep parser for noun_chunks; add sentencizer to ensure sentence boundaries on pasted text.
         self.nlp = spacy.load(spacy_model)
 
+        # Ensure sentence splitting works for pasted text
         if "sentencizer" not in self.nlp.pipe_names:
             self.nlp.add_pipe("sentencizer")
 
         self.enable_noun_chunks = enable_noun_chunks
-        self.enable_entities = enable_entities
-        self.max_chunk_words = max_chunk_words
-        self.min_node_chars = min_node_chars
+        self.mission_mode = mission_mode
 
-        # --- Subsystem lexicon (expand anytime) ---
-        self.lexicon: Dict[str, List[str]] = {
-            "TELECOM": [
-                "telecom", "telecommunications", "ttc", "tt&c",
-                "x-band", "ka-band", "s-band", "downlink", "uplink",
-                "antenna", "transmitter", "receiver", "modulation", "demodulation",
-                "link budget", "rf", "frequency", "bandwidth",
-                "data rate", "bit rate",
+        # -----------------------------------------
+        # Mission-first taxonomy keywords
+        # -----------------------------------------
+        self.mission_lexicon: Dict[str, List[str]] = {
+            "MISSION": [
+                "mission", "earth explorer", "candidate mission", "phase 0", "phase a",
+                "spacecraft", "satellite", "payload", "platform", "space segment",
+                "ground segment", "user segment",
             ],
-            "POWER": [
-                "solar array", "solar arrays", "solar panel", "solar panels",
-                "battery", "batteries", "power", "power subsystem",
-                "power distribution", "pdu", "pcdu", "bus voltage",
-                "regulated", "power distribution unit",
+            "PROGRAMME": [
+                "esa", "european space agency", "living planet programme", "earth explorer",
+                "futureeo", "earth observation", "eo mission",
             ],
-            "DATA": [
-                "onboard data handling", "data handling", "command and data handling", "cdh",
-                "mass memory", "memory", "storage", "secure storage",
-                "processing", "onboard processing", "compression",
-                "data volume", "data production",
+            "SCIENCE_OBJECTIVE": [
+                "objective", "objectives", "aim", "aims", "goal", "goals", "quest",
+                "questions", "pursuit", "provision of", "determine", "retrieving", "obtaining",
+                "establishing", "characterisation", "characterize",
             ],
-            "PAYLOAD": [
-                "payload", "instrument", "instruments",
-                "imaging spectrometer", "spectrometer",
-                "radiometer", "lidar", "laser", "sar", "altimeter", "camera",
-                "calibrated radiance", "geophysical products",
-                "level-1", "level-1b", "level-2",
+            "MEASUREMENT": [
+                "measurement", "measurements", "in-situ", "simultaneous measurements",
+                "retrieving", "retrieval", "estimates", "flux", "fluxes",
+                "densities", "temperatures", "precipitation", "heating",
+                "radiance", "spectral", "spectrometer", "radiometer", "lidar",
             ],
-            "ORBIT": [
-                "orbit", "orbital", "sun-synchronous", "sun synchronous",
-                "leo", "low earth orbit", "altitude", "inclination",
-                "ascending node", "eccentricity", "semi-major axis", "period",
+            "TARGET_REGION": [
+                "thermosphere", "ionosphere", "upper atmosphere", "lower thermosphere",
+                "lti", "altitudes", "100 km", "200 km", "region",
+                "middle atmosphere",
             ],
-            "GROUND": [
-                "ground segment", "ground station", "mission operations",
-                "mission control", "control center", "mcc",
-                "receiving station", "downlink station",
+            "MODELING": [
+                "models", "model", "uncertainties", "scarcity of observations",
+                "limited", "uncertain", "validation",
             ],
-            "PROPULSION": [
-                "propulsion", "thruster", "thrusters", "propellant", "tank", "tanks",
-                "delta-v", "orbit raising", "chemical propulsion", "electric propulsion",
-            ],
-            "THERMAL": [
-                "thermal", "radiator", "radiators", "heater", "heaters",
-                "insulation", "mli", "multi-layer insulation",
-                "temperature", "cooling", "heat pipe",
-            ],
-            "AOCS": [
-                "aocs", "adcs", "attitude", "attitude control", "orbit determination",
-                "reaction wheel", "momentum wheel", "star tracker", "gyroscope",
-                "magnetorquer", "sun sensor", "earth sensor",
+            "CONCEPT": [
+                "process", "processes", "interaction", "interactions", "dynamics",
+                "chemistry", "energetics", "system-level understanding",
+                "earth system science", "connection to space",
+                "gravity waves", "traveling atmospheric disturbances",
+                "irregularities",
             ],
         }
 
-        # Phrases we never want as nodes (common junk)
+        # -----------------------------------------
+        # Subsystem labels (only when clearly present)
+        # -----------------------------------------
+        self.subsystem_lexicon: Dict[str, List[str]] = {
+            "SUBSYSTEM_TELECOM": [
+                "telecom", "telecommunications", "ttc", "tt&c",
+                "downlink", "uplink", "x-band", "ka-band", "s-band",
+                "antenna", "transmitter", "receiver", "modulation",
+                "link budget", "data rate", "bit rate",
+            ],
+            "SUBSYSTEM_POWER": [
+                "solar array", "solar arrays", "battery", "batteries",
+                "power distribution", "pdu", "pcdu", "bus voltage",
+                "power subsystem",
+            ],
+            "SUBSYSTEM_DATA": [
+                "onboard data handling", "data handling", "mass memory",
+                "secure storage", "storage", "processing", "onboard processing",
+                "compression", "data volume",
+            ],
+            "SUBSYSTEM_PAYLOAD": [
+                "payload", "instrument", "instruments",
+                "imaging spectrometer", "spectrometer", "radiometer", "lidar", "sar",
+                "altimeter", "camera",
+                "level-1", "level-1b", "level-2", "geophysical products",
+            ],
+            "SUBSYSTEM_ORBIT": [
+                "orbit", "sun-synchronous", "sun synchronous", "leo",
+                "low earth orbit", "altitude", "inclination", "ascending node",
+            ],
+            "SUBSYSTEM_GROUND": [
+                "ground segment", "ground station", "mission operations",
+                "mission control", "receiving station",
+            ],
+            "SUBSYSTEM_PROPULSION": [
+                "propulsion", "thruster", "propellant", "tank", "delta-v",
+                "orbit raising", "chemical propulsion", "electric propulsion",
+            ],
+            "SUBSYSTEM_THERMAL": [
+                "thermal", "radiator", "heater", "insulation", "mli",
+                "temperature", "cooling",
+            ],
+            "SUBSYSTEM_AOCS": [
+                "aocs", "adcs", "attitude", "orbit determination",
+                "reaction wheel", "star tracker", "gyroscope", "magnetorquer",
+            ],
+        }
+
+        # Junk filtering (mission-only demo)
         self.stop_phrases = {
             "the mission", "the spacecraft", "the satellite", "the instrument",
             "the payload", "the system", "this mission", "this instrument",
-            "the provision", "the response", "the range", "the connection",
+            "this region", "this situation", "this work", "this study",
+            "the region", "the atmosphere", "the earth", "the questions",
+            "a set", "the set", "the provision", "the pursuit",
         }
 
-        # Leading words to strip (reduces duplicates like "the power distribution unit")
-        self.leading_determiners_re = re.compile(r"^(the|a|an)\s+", flags=re.I)
+        self.determiner_prefix = ("the ", "a ", "an ", "this ", "that ", "these ", "those ")
+
+        # Regex patterns for mission-style entities
+        self.token_patterns = [
+            # orbits / altitude
+            r"\b(?:sun-?synchronous|low earth orbit|leo|near-?polar)\b",
+            r"\b\d{2,4}\s?km\b",
+            r"\baltitudes?\b",
+            # ESA / programmes
+            r"\bESA\b",
+            r"\bLiving Planet Programme\b",
+            r"\bEarth Explorer\b",
+            # common science shorthand
+            r"\bLTI\b",
+            r"\bEPP\b",
+        ]
 
     # -----------------------------
     # Public API
@@ -131,29 +177,32 @@ class LabelledSubsystemKGBuilder:
 
         g = nx.Graph()
 
-        # nodes
+        # Nodes
         for s in spans:
             node = self.canon(s.text)
             if not node:
                 continue
 
-            # keep "best" label if the node appears multiple times
-            if node not in g:
-                g.add_node(
-                    node,
-                    entity_type=s.label,
-                    confidence=float(s.confidence),
-                )
-            else:
-                # upgrade confidence/label if new span is stronger
-                if float(s.confidence) > float(g.nodes[node].get("confidence", 0.0)):
+            # If already exists, keep the higher confidence label
+            if node in g:
+                old_c = float(g.nodes[node].get("confidence", 0.0))
+                if s.confidence > old_c:
                     g.nodes[node]["entity_type"] = s.label
                     g.nodes[node]["confidence"] = float(s.confidence)
+                continue
 
-        # edges: co-occurrence per sentence
+            g.add_node(
+                node,
+                entity_type=s.label,
+                confidence=float(s.confidence),
+                start=int(s.start),
+                end=int(s.end),
+            )
+
+        # Edges: co-occurrence per sentence
         for sent in doc.sents:
             a0, a1 = sent.start_char, sent.end_char
-            in_sent = []
+            in_sent: List[str] = []
 
             for s in spans:
                 if s.start >= a0 and s.end <= a1:
@@ -162,17 +211,15 @@ class LabelledSubsystemKGBuilder:
                         in_sent.append(node)
 
             in_sent = list(dict.fromkeys(in_sent))
-            if len(in_sent) < 2:
-                continue
-
             for i in range(len(in_sent)):
                 for j in range(i + 1, len(in_sent)):
                     u, v = in_sent[i], in_sent[j]
                     if u == v:
                         continue
+
                     if g.has_edge(u, v):
                         g[u][v]["weight"] += 1
-                        g[u][v]["confidence"] = min(1.0, float(g[u][v]["confidence"]) + 0.05)
+                        g[u][v]["confidence"] = min(1.0, g[u][v]["confidence"] + 0.05)
                     else:
                         g.add_edge(u, v, predicate="co-occurs", label="co-occurs", weight=1, confidence=0.35)
 
@@ -184,52 +231,69 @@ class LabelledSubsystemKGBuilder:
     def extract_spans(self, doc, raw_text: str) -> List[LabeledSpan]:
         spans: List[LabeledSpan] = []
 
-        # 0) NER entities (optional) — helps catch mission names, orgs, places
-        if self.enable_entities and hasattr(doc, "ents"):
-            for ent in doc.ents:
-                txt = ent.text.strip()
-                c = self.canon(txt)
-                if not c:
-                    continue
-                if c.lower() in self.stop_phrases:
-                    continue
-                if len(c.split()) > self.max_chunk_words:
-                    continue
-                label, conf = self.label_span(c)
-                spans.append(LabeledSpan(text=c, label=label, start=ent.start_char, end=ent.end_char, confidence=conf))
+        # 1) Proper nouns / mission names: capture TitleCase sequences (Daedalus, Earth Explorer, Living Planet Programme)
+        # Keep conservative: 1-5 tokens
+        for m in re.finditer(r"\b(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,4})\b", raw_text):
+            txt = raw_text[m.start():m.end()]
+            c = self.canon(txt)
+            if not c:
+                continue
+            # Skip if it's sentence-start generic word
+            if c.lower() in {"accordingly", "answers", "complex", "daedalus"} or len(c) < 3:
+                pass
+            label, conf = self.label_span(c)
+            # boost if looks like a mission name (single capitalized token)
+            if re.fullmatch(r"[A-Z][a-z]{2,}", c):
+                conf = max(conf, 0.80)
+                label = "MISSION"
+            spans.append(LabeledSpan(text=c, label=label, start=m.start(), end=m.end(), confidence=conf))
 
-        # 1) noun chunks (good for subsystem phrases)
+        # 2) Noun chunks (mission terms, science objectives)
         if self.enable_noun_chunks and doc.has_annotation("DEP"):
             for chunk in doc.noun_chunks:
                 txt = chunk.text.strip()
                 c = self.canon(txt)
                 if not c:
                     continue
-                if c.lower() in self.stop_phrases:
+
+                low = c.lower()
+
+                # strip determiners and re-canon
+                if low.startswith(self.determiner_prefix):
+                    c2 = self.canon(re.sub(r"^(the|a|an|this|that|these|those)\s+", "", c, flags=re.I))
+                    if c2:
+                        c = c2
+                        low = c.lower()
+
+                # filters
+                if low in self.stop_phrases:
                     continue
-                if len(c.split()) > self.max_chunk_words:
+                if len(c.split()) > 7:
                     continue
+                if len(c) < 3:
+                    continue
+
+                # Mission-mode: keep only "meaningful" chunks:
+                # (a) chunk contains at least one mission/science keyword
+                # OR (b) chunk is a named region/science term with capitals/acronyms
+                if self.mission_mode:
+                    keep = self._looks_mission_relevant(low, c)
+                    if not keep:
+                        continue
 
                 label, conf = self.label_span(c)
-                spans.append(LabeledSpan(text=c, label=label, start=chunk.start_char, end=chunk.end_char, confidence=conf))
+                spans.append(
+                    LabeledSpan(
+                        text=c,
+                        label=label,
+                        start=chunk.start_char,
+                        end=chunk.end_char,
+                        confidence=conf,
+                    )
+                )
 
-        # 2) key token patterns (X-band, CO2, Level-2, 100 km, etc.)
-        token_patterns = [
-            r"\b(?:x|s|ka)\s*-\s*band\b",
-            r"\bco\s*2\b",
-            r"\bch\s*4\b",
-            r"\blevel\s*-\s*1b\b",
-            r"\blevel\s*-\s*2\b",
-            r"\blevel\s*1b\b",
-            r"\blevel\s*2\b",
-            r"\bsun\s*-\s*synchronous\b",
-            r"\bsun\s*synchronous\b",
-            r"\b\d+(?:\.\d+)?\s?km\b",
-            r"\b\d+(?:\.\d+)?\s?w\b",
-            r"\b\d+(?:\.\d+)?\s?hz\b",
-            r"\b\d+(?:\.\d+)?\s?ghz\b",
-        ]
-        for pat in token_patterns:
+        # 3) Regex token patterns (EPP/LTI/100 km/etc.)
+        for pat in self.token_patterns:
             for m in re.finditer(pat, raw_text, flags=re.I):
                 txt = raw_text[m.start():m.end()]
                 c = self.canon(txt)
@@ -238,87 +302,93 @@ class LabelledSubsystemKGBuilder:
                 label, conf = self.label_span(c)
                 spans.append(LabeledSpan(text=c, label=label, start=m.start(), end=m.end(), confidence=conf))
 
-        # 3) de-dup by canonical text + sentence region (reduces duplicates heavily)
-        # (start/end vary slightly between noun_chunks and ents; we mainly care about node text)
-        best: Dict[str, LabeledSpan] = {}
+        # De-dup by canonical text + label (keep max confidence)
+        best: Dict[Tuple[str, str], LabeledSpan] = {}
         for s in spans:
-            key = self.canon(s.text)
-            if not key:
-                continue
+            key = (self.canon(s.text), s.label)
             if key not in best or s.confidence > best[key].confidence:
                 best[key] = s
 
         return list(best.values())
 
+    def _looks_mission_relevant(self, low: str, original: str) -> bool:
+        # Contains any mission/science lexicon keyword
+        for keys in list(self.mission_lexicon.values()) + list(self.subsystem_lexicon.values()):
+            for k in keys:
+                if k in low:
+                    return True
+
+        # Contains acronyms or obvious science terms
+        if re.search(r"\b[A-Z]{2,6}\b", original):  # LTI, EPP, ESA
+            return True
+
+        # Contains hyphenated technical term
+        if "-" in original and len(original) <= 40:
+            return True
+
+        return False
+
     # -----------------------------
-    # Labelling (fallback)
+    # Labelling (lexicon fallback)
     # -----------------------------
     def label_span(self, span_text: str) -> Tuple[str, float]:
         """
-        Keyword/lexicon labeler (demo-ready).
-        Replace with SpaceBERT inference later.
+        Lexicon labeler:
+          - If a subsystem keyword hits strongly, return SUBSYSTEM_* label.
+          - Else mission/science labels.
         """
         low = span_text.lower()
 
+        # 1) Subsystem scoring (strong hits only)
+        best_sub = None
+        best_sub_score = 0
+        for lab, keys in self.subsystem_lexicon.items():
+            score = sum(1 for k in keys if k in low)
+            if score > best_sub_score:
+                best_sub_score = score
+                best_sub = lab
+
+        if best_sub and best_sub_score >= 2:
+            return best_sub, 0.85
+        if best_sub and best_sub_score == 1:
+            # only accept 1-hit subsystem if the span is short/technical
+            if len(span_text.split()) <= 3 or re.search(r"band|antenna|thruster|battery|orbit", low):
+                return best_sub, 0.70
+
+        # 2) Mission/science labels
         best_label = "OTHER"
         best_score = 0
-
-        for label, keys in self.lexicon.items():
-            score = 0
-            for k in keys:
-                if k in low:
-                    score += 1
+        for lab, keys in self.mission_lexicon.items():
+            score = sum(1 for k in keys if k in low)
             if score > best_score:
                 best_score = score
-                best_label = label
+                best_label = lab
 
-        # confidence heuristic
         if best_label == "OTHER":
             return "OTHER", 0.30
-        if best_score >= 3:
-            return best_label, 0.85
-        if best_score == 2:
-            return best_label, 0.75
+        if best_score >= 2:
+            return best_label, 0.80
         return best_label, 0.60
 
     # -----------------------------
-    # Normalization
+    # Normalization (important)
     # -----------------------------
     def canon(self, s: str) -> str:
+        x = (s or "").strip()
+        if not x:
+            return ""
         x = re.sub(r"\s+", " ", x)
         x = x.strip(" ,.;:()[]{}\"'")
-        x = re.sub(r"^(the|a|an)\s+", "", x, flags=re.I)
 
-    # ignore very short junk
-       if len(x) < 3:
-           return ""
-
-       return x
-
-        # normalize unicode subscripts like CO₂ -> CO2
+        # Normalize unicode subscripts like CO₂ -> CO2
         sub_map = str.maketrans({
             "₀": "0", "₁": "1", "₂": "2", "₃": "3", "₄": "4",
             "₅": "5", "₆": "6", "₇": "7", "₈": "8", "₉": "9",
         })
         x = x.translate(sub_map)
 
-        # strip quotes/punct and collapse whitespace
-        x = re.sub(r"\s+", " ", x)
-        x = x.strip(" ,.;:()[]{}\"'")
-
-        # strip leading determiners ("the", "a", "an")
-        x = self.leading_determiners_re.sub("", x).strip()
-
-        # canonicalize short formulas like Co2 -> CO2, Ch4 -> CH4
+        # Canonicalize short formulas like Co2 -> CO2
         if re.fullmatch(r"[A-Za-z]{1,3}\d{0,3}", x):
             x = x.upper()
-
-        # ignore tiny junk
-        if len(x) < self.min_node_chars:
-            return ""
-
-        # avoid stop phrases after normalization
-        if x.lower() in self.stop_phrases:
-            return ""
 
         return x
