@@ -32,75 +32,93 @@ class LabelledSubsystemKGBuilder:
       - Assign each span a subsystem label (TELECOM/POWER/DATA/etc.)
       - Connect spans that co-occur in the same sentence
 
-    This implementation is "demo-safe":
+    Demo-safe:
       - Works without a fine-tuned model (uses lexicon fallback).
-      - Later, you can replace `label_span()` with SpaceBERT inference.
+      - Later, replace `label_span()` with SpaceBERT inference.
     """
 
     def __init__(
         self,
         spacy_model: str = "en_core_web_sm",
         enable_noun_chunks: bool = True,
+        enable_entities: bool = True,
+        max_chunk_words: int = 6,
+        min_node_chars: int = 3,
     ):
-        # We need sentence boundaries, so keep parser OR add sentencizer
+        # Keep parser for noun_chunks; add sentencizer to ensure sentence boundaries on pasted text.
         self.nlp = spacy.load(spacy_model)
 
-        # Some spaCy pipelines don't split sentences well on pasted text:
         if "sentencizer" not in self.nlp.pipe_names:
             self.nlp.add_pipe("sentencizer")
 
         self.enable_noun_chunks = enable_noun_chunks
+        self.enable_entities = enable_entities
+        self.max_chunk_words = max_chunk_words
+        self.min_node_chars = min_node_chars
 
-        # Simple subsystem lexicon (expand anytime)
-        # Each subsystem has keywords that likely belong to it
+        # --- Subsystem lexicon (expand anytime) ---
         self.lexicon: Dict[str, List[str]] = {
             "TELECOM": [
                 "telecom", "telecommunications", "ttc", "tt&c",
                 "x-band", "ka-band", "s-band", "downlink", "uplink",
-                "antenna", "transmitter", "receiver", "modulation", "link budget",
+                "antenna", "transmitter", "receiver", "modulation", "demodulation",
+                "link budget", "rf", "frequency", "bandwidth",
                 "data rate", "bit rate",
             ],
             "POWER": [
-                "solar array", "solar arrays", "battery", "batteries",
+                "solar array", "solar arrays", "solar panel", "solar panels",
+                "battery", "batteries", "power", "power subsystem",
                 "power distribution", "pdu", "pcdu", "bus voltage",
-                "regulated", "power subsystem",
+                "regulated", "power distribution unit",
             ],
             "DATA": [
-                "onboard data handling", "data handling", "mass memory",
-                "storage", "secure storage", "processing", "onboard processing",
-                "compression", "downlinked data", "data volume",
+                "onboard data handling", "data handling", "command and data handling", "cdh",
+                "mass memory", "memory", "storage", "secure storage",
+                "processing", "onboard processing", "compression",
+                "data volume", "data production",
             ],
             "PAYLOAD": [
-                "payload", "instrument", "imaging spectrometer", "spectrometer",
-                "radiometer", "lidar", "sar", "altimeter", "camera",
-                "calibrated radiance", "level-1", "level-1b", "level-2", "geophysical products",
+                "payload", "instrument", "instruments",
+                "imaging spectrometer", "spectrometer",
+                "radiometer", "lidar", "laser", "sar", "altimeter", "camera",
+                "calibrated radiance", "geophysical products",
+                "level-1", "level-1b", "level-2",
             ],
             "ORBIT": [
-                "orbit", "sun-synchronous", "sun synchronous", "leo",
-                "low earth orbit", "altitude", "inclination", "ascending node",
+                "orbit", "orbital", "sun-synchronous", "sun synchronous",
+                "leo", "low earth orbit", "altitude", "inclination",
+                "ascending node", "eccentricity", "semi-major axis", "period",
             ],
             "GROUND": [
                 "ground segment", "ground station", "mission operations",
-                "mission control", "receiving station",
+                "mission control", "control center", "mcc",
+                "receiving station", "downlink station",
             ],
             "PROPULSION": [
-                "propulsion", "thruster", "propellant", "tank", "delta-v",
-                "orbit raising", "chemical propulsion", "electric propulsion",
+                "propulsion", "thruster", "thrusters", "propellant", "tank", "tanks",
+                "delta-v", "orbit raising", "chemical propulsion", "electric propulsion",
             ],
             "THERMAL": [
-                "thermal", "radiator", "heater", "insulation", "ml i", "mli",
-                "temperature", "cooling",
+                "thermal", "radiator", "radiators", "heater", "heaters",
+                "insulation", "mli", "multi-layer insulation",
+                "temperature", "cooling", "heat pipe",
             ],
             "AOCS": [
-                "aocs", "adcs", "attitude", "orbit determination",
-                "reaction wheel", "star tracker", "gyroscope", "magnetorquer",
+                "aocs", "adcs", "attitude", "attitude control", "orbit determination",
+                "reaction wheel", "momentum wheel", "star tracker", "gyroscope",
+                "magnetorquer", "sun sensor", "earth sensor",
             ],
         }
 
+        # Phrases we never want as nodes (common junk)
         self.stop_phrases = {
             "the mission", "the spacecraft", "the satellite", "the instrument",
-            "the payload", "the system", "this mission", "this instrument"
+            "the payload", "the system", "this mission", "this instrument",
+            "the provision", "the response", "the range", "the connection",
         }
+
+        # Leading words to strip (reduces duplicates like "the power distribution unit")
+        self.leading_determiners_re = re.compile(r"^(the|a|an)\s+", flags=re.I)
 
     # -----------------------------
     # Public API
@@ -118,19 +136,25 @@ class LabelledSubsystemKGBuilder:
             node = self.canon(s.text)
             if not node:
                 continue
+
+            # keep "best" label if the node appears multiple times
             if node not in g:
                 g.add_node(
                     node,
                     entity_type=s.label,
                     confidence=float(s.confidence),
-                    start=int(s.start),
-                    end=int(s.end),
                 )
+            else:
+                # upgrade confidence/label if new span is stronger
+                if float(s.confidence) > float(g.nodes[node].get("confidence", 0.0)):
+                    g.nodes[node]["entity_type"] = s.label
+                    g.nodes[node]["confidence"] = float(s.confidence)
 
         # edges: co-occurrence per sentence
         for sent in doc.sents:
-            in_sent = []
             a0, a1 = sent.start_char, sent.end_char
+            in_sent = []
+
             for s in spans:
                 if s.start >= a0 and s.end <= a1:
                     node = self.canon(s.text)
@@ -138,6 +162,9 @@ class LabelledSubsystemKGBuilder:
                         in_sent.append(node)
 
             in_sent = list(dict.fromkeys(in_sent))
+            if len(in_sent) < 2:
+                continue
+
             for i in range(len(in_sent)):
                 for j in range(i + 1, len(in_sent)):
                     u, v = in_sent[i], in_sent[j]
@@ -145,7 +172,7 @@ class LabelledSubsystemKGBuilder:
                         continue
                     if g.has_edge(u, v):
                         g[u][v]["weight"] += 1
-                        g[u][v]["confidence"] = min(1.0, g[u][v]["confidence"] + 0.05)
+                        g[u][v]["confidence"] = min(1.0, float(g[u][v]["confidence"]) + 0.05)
                     else:
                         g.add_edge(u, v, predicate="co-occurs", label="co-occurs", weight=1, confidence=0.35)
 
@@ -157,30 +184,50 @@ class LabelledSubsystemKGBuilder:
     def extract_spans(self, doc, raw_text: str) -> List[LabeledSpan]:
         spans: List[LabeledSpan] = []
 
-        # 1) noun chunks (good for mission terms)
+        # 0) NER entities (optional) — helps catch mission names, orgs, places
+        if self.enable_entities and hasattr(doc, "ents"):
+            for ent in doc.ents:
+                txt = ent.text.strip()
+                c = self.canon(txt)
+                if not c:
+                    continue
+                if c.lower() in self.stop_phrases:
+                    continue
+                if len(c.split()) > self.max_chunk_words:
+                    continue
+                label, conf = self.label_span(c)
+                spans.append(LabeledSpan(text=c, label=label, start=ent.start_char, end=ent.end_char, confidence=conf))
+
+        # 1) noun chunks (good for subsystem phrases)
         if self.enable_noun_chunks and doc.has_annotation("DEP"):
             for chunk in doc.noun_chunks:
                 txt = chunk.text.strip()
-                if not txt:
-                    continue
                 c = self.canon(txt)
-                if not c or c.lower() in self.stop_phrases:
+                if not c:
                     continue
-                if len(c.split()) > 6:
+                if c.lower() in self.stop_phrases:
+                    continue
+                if len(c.split()) > self.max_chunk_words:
                     continue
 
                 label, conf = self.label_span(c)
                 spans.append(LabeledSpan(text=c, label=label, start=chunk.start_char, end=chunk.end_char, confidence=conf))
 
-        # 2) also extract important single tokens (X-band, CO2, CH4, Level-1B, etc.)
+        # 2) key token patterns (X-band, CO2, Level-2, 100 km, etc.)
         token_patterns = [
-            r"\b(?:x|s|ka)-band\b",
-            r"\bco2\b",
-            r"\bch4\b",
-            r"\blevel-?\s?1b\b",
-            r"\blevel-?\s?2\b",
-            r"\bsun-?synchronous\b",
-            r"\b\d+\s?km\b",
+            r"\b(?:x|s|ka)\s*-\s*band\b",
+            r"\bco\s*2\b",
+            r"\bch\s*4\b",
+            r"\blevel\s*-\s*1b\b",
+            r"\blevel\s*-\s*2\b",
+            r"\blevel\s*1b\b",
+            r"\blevel\s*2\b",
+            r"\bsun\s*-\s*synchronous\b",
+            r"\bsun\s*synchronous\b",
+            r"\b\d+(?:\.\d+)?\s?km\b",
+            r"\b\d+(?:\.\d+)?\s?w\b",
+            r"\b\d+(?:\.\d+)?\s?hz\b",
+            r"\b\d+(?:\.\d+)?\s?ghz\b",
         ]
         for pat in token_patterns:
             for m in re.finditer(pat, raw_text, flags=re.I):
@@ -191,20 +238,25 @@ class LabelledSubsystemKGBuilder:
                 label, conf = self.label_span(c)
                 spans.append(LabeledSpan(text=c, label=label, start=m.start(), end=m.end(), confidence=conf))
 
-        # de-dup by (start,end,label)
-        uniq = {}
+        # 3) de-dup by canonical text + sentence region (reduces duplicates heavily)
+        # (start/end vary slightly between noun_chunks and ents; we mainly care about node text)
+        best: Dict[str, LabeledSpan] = {}
         for s in spans:
-            key = (s.start, s.end, s.label)
-            uniq[key] = s
-        return list(uniq.values())
+            key = self.canon(s.text)
+            if not key:
+                continue
+            if key not in best or s.confidence > best[key].confidence:
+                best[key] = s
+
+        return list(best.values())
 
     # -----------------------------
     # Labelling (fallback)
     # -----------------------------
     def label_span(self, span_text: str) -> Tuple[str, float]:
         """
-        Today: keyword/lexicon labeler (demo-ready).
-        Later: replace this with SpaceBERT inference and confidence.
+        Keyword/lexicon labeler (demo-ready).
+        Replace with SpaceBERT inference later.
         """
         low = span_text.lower()
 
@@ -223,8 +275,10 @@ class LabelledSubsystemKGBuilder:
         # confidence heuristic
         if best_label == "OTHER":
             return "OTHER", 0.30
-        if best_score >= 2:
-            return best_label, 0.80
+        if best_score >= 3:
+            return best_label, 0.85
+        if best_score == 2:
+            return best_label, 0.75
         return best_label, 0.60
 
     # -----------------------------
@@ -232,12 +286,33 @@ class LabelledSubsystemKGBuilder:
     # -----------------------------
     def canon(self, s: str) -> str:
         x = (s or "").strip()
+        if not x:
+            return ""
+
+        # normalize unicode subscripts like CO₂ -> CO2
+        sub_map = str.maketrans({
+            "₀": "0", "₁": "1", "₂": "2", "₃": "3", "₄": "4",
+            "₅": "5", "₆": "6", "₇": "7", "₈": "8", "₉": "9",
+        })
+        x = x.translate(sub_map)
+
+        # strip quotes/punct and collapse whitespace
         x = re.sub(r"\s+", " ", x)
         x = x.strip(" ,.;:()[]{}\"'")
-        # normalize unicode subscripts like CO₂ -> CO2
-        sub_map = str.maketrans({"₀":"0","₁":"1","₂":"2","₃":"3","₄":"4","₅":"5","₆":"6","₇":"7","₈":"8","₉":"9"})
-        x = x.translate(sub_map)
-        # canonicalize short formulas like Co2 -> CO2
+
+        # strip leading determiners ("the", "a", "an")
+        x = self.leading_determiners_re.sub("", x).strip()
+
+        # canonicalize short formulas like Co2 -> CO2, Ch4 -> CH4
         if re.fullmatch(r"[A-Za-z]{1,3}\d{0,3}", x):
             x = x.upper()
+
+        # ignore tiny junk
+        if len(x) < self.min_node_chars:
+            return ""
+
+        # avoid stop phrases after normalization
+        if x.lower() in self.stop_phrases:
+            return ""
+
         return x
