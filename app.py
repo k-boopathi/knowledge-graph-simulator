@@ -18,7 +18,7 @@ from modules.export_utils import graph_to_json_bytes, graph_to_csv_bytes, graph_
 from modules.cooccurrence_builder import CooccurrenceGraphBuilder
 
 # -----------------------------
-# NEW: SpaceBERT subsystem-labelled KG builder
+# NEW: Labelled KG builder (missions / classes)
 # -----------------------------
 # Create this file:
 #   modules/extractors/labelled_subsystem_kg_builder.py
@@ -37,8 +37,10 @@ except Exception:
 # -----------------------------
 def normalize_subsystem_label(x: str) -> str:
     """
-    Map model labels to stable UI filter keys.
-    Adjust this mapping to YOUR model's actual label strings.
+    Map model labels (or lexicon labels) to stable UI filter keys.
+
+    If you switch from subsystem labels to mission-domain labels,
+    update this mapping accordingly (or keep it as a passthrough).
     """
     s = (x or "").strip()
     if not s or s.upper() == "O":
@@ -46,14 +48,14 @@ def normalize_subsystem_label(x: str) -> str:
 
     low = s.lower()
 
-    # common normalizations (examples)
+    # --- Subsystem-ish normalizations (keep if your builder outputs these) ---
     if "tele" in low:
         return "TELECOM"
     if "prop" in low:
         return "PROPULSION"
     if "power" in low or "eps" in low:
         return "POWER"
-    if "thermal" in low or "ttc" in low:
+    if "thermal" in low:
         return "THERMAL"
     if "aocs" in low or "adcs" in low or "attitude" in low:
         return "AOCS"
@@ -65,13 +67,28 @@ def normalize_subsystem_label(x: str) -> str:
         return "DATA"
     if "orbit" in low:
         return "ORBIT"
+
+    # --- Mission-domain-ish examples (keep if your builder outputs these) ---
+    if "mission" in low:
+        return "MISSION"
+    if "objective" in low:
+        return "SCIENCE_OBJECTIVE"
+    if "measurement" in low or "observ" in low:
+        return "MEASUREMENT"
+    if "target" in low or "thermosphere" in low or "ionosphere" in low:
+        return "TARGET_REGION"
+    if "model" in low:
+        return "MODELING"
+    if "programme" in low or "program" in low:
+        return "PROGRAMME"
     if "concept" in low:
         return "CONCEPT"
+
     if "other" in low:
         return "OTHER"
 
-    # fallback: keep the raw label uppercased if it is short
-    if len(s) <= 24:
+    # fallback: keep short raw label uppercased
+    if len(s) <= 32:
         return s.upper()
 
     return "UNKNOWN"
@@ -79,10 +96,11 @@ def normalize_subsystem_label(x: str) -> str:
 
 def get_labelled_show_types() -> dict:
     """
-    Default subsystem filters to show in the sidebar.
-    Keep these consistent with normalize_subsystem_label().
+    Default class filters for the labelled KG mode.
+    You can keep subsystem labels OR mission-domain labels (or both).
     """
     return {
+        # subsystem labels
         "TELECOM": True,
         "PROPULSION": True,
         "POWER": True,
@@ -92,14 +110,23 @@ def get_labelled_show_types() -> dict:
         "GROUND": True,
         "DATA": True,
         "ORBIT": True,
+
+        # mission-domain labels
+        "MISSION": True,
+        "PROGRAMME": True,
+        "TARGET_REGION": True,
+        "SCIENCE_OBJECTIVE": True,
+        "MEASUREMENT": True,
+        "MODELING": True,
         "CONCEPT": True,
+
+        # misc
         "OTHER": True,
         "UNKNOWN": True,
     }
 
 
 def color_map_for_mode(mode: str) -> dict:
-    # NOTE: PyVis accepts hex colors; keep your previous vibe.
     if mode == "Web Graph":
         return {
             "PERSON": "#4C78A8",
@@ -110,6 +137,8 @@ def color_map_for_mode(mode: str) -> dict:
             "CONCEPT": "#B279A2",
             "UNKNOWN": "#B0B0B0",
         }
+
+    # labelled KG colors (covers both subsystem + mission-domain labels)
     return {
         "TELECOM": "#ff6b6b",
         "PROPULSION": "#ffa94d",
@@ -120,7 +149,15 @@ def color_map_for_mode(mode: str) -> dict:
         "GROUND": "#20c997",
         "DATA": "#adb5bd",
         "ORBIT": "#74c0fc",
+
+        "MISSION": "#4C78A8",
+        "PROGRAMME": "#72B7B2",
+        "TARGET_REGION": "#54A24B",
+        "SCIENCE_OBJECTIVE": "#B279A2",
+        "MEASUREMENT": "#E45756",
+        "MODELING": "#9c755f",
         "CONCEPT": "#b279a2",
+
         "OTHER": "#888888",
         "UNKNOWN": "#B0B0B0",
     }
@@ -132,7 +169,7 @@ def color_map_for_mode(mode: str) -> dict:
 st.set_page_config(page_title="Knowledge Graph Simulator", layout="wide")
 st.title("Knowledge Graph Simulator")
 st.caption(
-    "Web Graph (NER + co-occurrence) + Labelled Subsystem KG (SpaceBERT token classification). "
+    "Web Graph (NER + co-occurrence) + Labelled KG (class mapping). "
     "Analytics, coloring, export, filters."
 )
 
@@ -149,8 +186,7 @@ if "co_builder" not in st.session_state:
     st.session_state.co_builder = CooccurrenceGraphBuilder()
 
 if "labelled_builder" not in st.session_state:
-    # IMPORTANT: pass your actual fine-tuned model name/path if needed
-    # Example: LabelledSubsystemKGBuilder("path/to/your-finetuned-model")
+    # If your LabelledSubsystemKGBuilder requires params, pass them here.
     st.session_state.labelled_builder = LabelledSubsystemKGBuilder() if LabelledSubsystemKGBuilder else None
 
 if "last_input_text" not in st.session_state:
@@ -158,9 +194,6 @@ if "last_input_text" not in st.session_state:
 
 if "last_raw_graph" not in st.session_state:
     st.session_state.last_raw_graph = nx.Graph()
-
-if "last_graph_mode" not in st.session_state:
-    st.session_state.last_graph_mode = "Web Graph"
 
 # -----------------------------
 # Sidebar controls
@@ -172,11 +205,9 @@ with st.sidebar:
         "Graph Mode",
         ["Web Graph", "Labelled Subsystem KG"],
         index=0,
-        help="Web Graph: standard NER + co-occurrence. Labelled Subsystem KG: SpaceBERT labels nodes by subsystem.",
+        help="Web Graph: standard NER + co-occurrence. Labelled Subsystem KG: class labels assigned to nodes.",
         key="graph_mode_radio",
     )
-
-    st.session_state.last_graph_mode = graph_mode
 
     st.divider()
 
@@ -205,11 +236,14 @@ with st.sidebar:
             for k in defaults.keys()
         }
 
-        # optional: show what model is loaded
         if st.session_state.labelled_builder is None:
             st.warning("LabelledSubsystemKGBuilder not available (missing module).")
+            st.caption(
+                "Create: modules/extractors/labelled_subsystem_kg_builder.py\n"
+                "and define LabelledSubsystemKGBuilder."
+            )
         else:
-            st.caption("Subsystem labels come from your SpaceBERT token classifier.")
+            st.caption("Labels come from your labelled KG builder (lexicon or model).")
 
     st.divider()
 
@@ -236,8 +270,8 @@ with col_graph:
         height=230,
         placeholder=(
             "Example:\n"
-            "The CubeSat Telecom subsystem shall include a transmitter antenna and RF power amplifier.\n"
-            "The propulsion subsystem shall provide delta-v using cold gas thrusters.\n"
+            "Daedalus targets the lower thermosphere and ionosphere at altitudes between 100 and 200 km.\n"
+            "The mission aims to provide in-situ measurements of key parameters.\n"
         ),
         key="text_input_area",
     )
@@ -250,12 +284,11 @@ with col_graph:
             st.session_state.graph_manager.reset_graph()
 
             # -----------------------------
-            # Build raw graph (source-of-truth for node types)
+            # Build raw graph
             # -----------------------------
             if graph_mode == "Web Graph":
                 raw_g = st.session_state.co_builder.build(text_input)
 
-                # store into GraphManager for exports
                 edges_for_manager = []
                 for u, v, data in raw_g.edges(data=True):
                     label = str(data.get("label") or data.get("predicate") or "co-occurs")
@@ -263,7 +296,7 @@ with col_graph:
                     edges_for_manager.append((u, label, v, confidence))
                 st.session_state.graph_manager.add_triples(edges_for_manager)
 
-                # Also store node types (best-effort) for exports/inspection
+                # Ensure node type exists for exports
                 base_g = st.session_state.graph_manager.get_graph()
                 for n in base_g.nodes():
                     base_g.nodes[n]["entity_type"] = "UNKNOWN"
@@ -279,7 +312,6 @@ with col_graph:
                 else:
                     raw_g = st.session_state.labelled_builder.build(text_input, min_conf=0.0)
 
-                    # store edges into GraphManager for exports
                     edges_for_manager = []
                     for u, v, data in raw_g.edges(data=True):
                         label = str(data.get("label") or data.get("predicate") or "co-occurs")
@@ -287,7 +319,7 @@ with col_graph:
                         edges_for_manager.append((u, label, v, confidence))
                     st.session_state.graph_manager.add_triples(edges_for_manager)
 
-                    # Copy node types from raw_g -> manager graph so exports include them
+                    # Copy node types to manager graph so exports include them
                     base_g = st.session_state.graph_manager.get_graph()
                     for n in base_g.nodes():
                         base_g.nodes[n]["entity_type"] = "UNKNOWN"
@@ -296,6 +328,8 @@ with col_graph:
                         if n in base_g.nodes:
                             t = attrs.get("entity_type") or "UNKNOWN"
                             base_g.nodes[n]["entity_type"] = normalize_subsystem_label(t)
+                            if "confidence" in attrs:
+                                base_g.nodes[n]["confidence"] = float(attrs.get("confidence", 0.0))
 
             st.session_state.last_raw_graph = raw_g
 
@@ -346,14 +380,18 @@ with col_graph:
         cmap = color_map_for_mode(graph_mode)
         degrees = dict(viz.degree())
 
+        # ✅ show [TYPE] on node label itself
         for node, attrs in viz.nodes(data=True):
             t = attrs.get("entity_type", "UNKNOWN")
+            node_conf = float(base_g.nodes[node].get("confidence", 0.0)) if node in base_g.nodes else 0.0
+            node_label = f"{node}\n[{t}]"
+
             net.add_node(
                 node,
-                label=node,
+                label=node_label,
                 size=12 + degrees.get(node, 0) * 5,
                 color=cmap.get(t, "#B0B0B0"),
-                title=f"type: {t}",
+                title=f"type: {t}<br>confidence: {node_conf:.2f}",
             )
 
         for u, v, data in viz.edges(data=True):
@@ -399,6 +437,7 @@ with col_graph:
         net.save_graph(output_file)
         with open(output_file, "r", encoding="utf-8") as f:
             components.html(f.read(), height=650)
+
     else:
         if base_g.number_of_nodes() == 0:
             st.info("Graph is empty. Paste text and click Build Graph.")
@@ -447,4 +486,3 @@ with col_side:
     st.download_button("Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
     st.download_button("Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
     st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
-
