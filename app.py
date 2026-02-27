@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+
 import streamlit as st
 import networkx as nx
 from pyvis.network import Network
@@ -16,19 +17,124 @@ from modules.entity_typer import EntityTyper
 from modules.export_utils import graph_to_json_bytes, graph_to_csv_bytes, graph_to_pdf_bytes
 from modules.cooccurrence_builder import CooccurrenceGraphBuilder
 
-# --- NEW: SpaceBERT subsystem-labelled KG builder ---
-# If you haven't created this file yet, create:
+# -----------------------------
+# NEW: SpaceBERT subsystem-labelled KG builder
+# -----------------------------
+# Create this file:
 #   modules/extractors/labelled_subsystem_kg_builder.py
-# and implement LabelledSubsystemKGBuilder.build(text) -> nx.Graph/nx.DiGraph with node attr "entity_type"
+# and ensure it defines:
+#   class LabelledSubsystemKGBuilder:
+#       def __init__(...): ...
+#       def build(self, text: str, min_conf: float = 0.0) -> nx.Graph
 try:
     from modules.extractors.labelled_subsystem_kg_builder import LabelledSubsystemKGBuilder
 except Exception:
     LabelledSubsystemKGBuilder = None
 
 
+# -----------------------------
+# Helpers
+# -----------------------------
+def normalize_subsystem_label(x: str) -> str:
+    """
+    Map model labels to stable UI filter keys.
+    Adjust this mapping to YOUR model's actual label strings.
+    """
+    s = (x or "").strip()
+    if not s or s.upper() == "O":
+        return "UNKNOWN"
+
+    low = s.lower()
+
+    # common normalizations (examples)
+    if "tele" in low:
+        return "TELECOM"
+    if "prop" in low:
+        return "PROPULSION"
+    if "power" in low or "eps" in low:
+        return "POWER"
+    if "thermal" in low or "ttc" in low:
+        return "THERMAL"
+    if "aocs" in low or "adcs" in low or "attitude" in low:
+        return "AOCS"
+    if "payload" in low or "instrument" in low:
+        return "PAYLOAD"
+    if "ground" in low:
+        return "GROUND"
+    if "data" in low or "cdh" in low or "handling" in low:
+        return "DATA"
+    if "orbit" in low:
+        return "ORBIT"
+    if "concept" in low:
+        return "CONCEPT"
+    if "other" in low:
+        return "OTHER"
+
+    # fallback: keep the raw label uppercased if it is short
+    if len(s) <= 24:
+        return s.upper()
+
+    return "UNKNOWN"
+
+
+def get_labelled_show_types() -> dict:
+    """
+    Default subsystem filters to show in the sidebar.
+    Keep these consistent with normalize_subsystem_label().
+    """
+    return {
+        "TELECOM": True,
+        "PROPULSION": True,
+        "POWER": True,
+        "THERMAL": True,
+        "AOCS": True,
+        "PAYLOAD": True,
+        "GROUND": True,
+        "DATA": True,
+        "ORBIT": True,
+        "CONCEPT": True,
+        "OTHER": True,
+        "UNKNOWN": True,
+    }
+
+
+def color_map_for_mode(mode: str) -> dict:
+    # NOTE: PyVis accepts hex colors; keep your previous vibe.
+    if mode == "Web Graph":
+        return {
+            "PERSON": "#4C78A8",
+            "ORG": "#F58518",
+            "LOC": "#54A24B",
+            "PRODUCT": "#E45756",
+            "GAS": "#E45756",
+            "CONCEPT": "#B279A2",
+            "UNKNOWN": "#B0B0B0",
+        }
+    return {
+        "TELECOM": "#ff6b6b",
+        "PROPULSION": "#ffa94d",
+        "POWER": "#ffd43b",
+        "THERMAL": "#69db7c",
+        "AOCS": "#4dabf7",
+        "PAYLOAD": "#9775fa",
+        "GROUND": "#20c997",
+        "DATA": "#adb5bd",
+        "ORBIT": "#74c0fc",
+        "CONCEPT": "#b279a2",
+        "OTHER": "#888888",
+        "UNKNOWN": "#B0B0B0",
+    }
+
+
+# -----------------------------
+# App header
+# -----------------------------
 st.set_page_config(page_title="Knowledge Graph Simulator", layout="wide")
 st.title("Knowledge Graph Simulator")
-st.caption("Web Graph (NER+co-occurrence) + Labelled Subsystem KG (SpaceBERT). Analytics, export, filters.")
+st.caption(
+    "Web Graph (NER + co-occurrence) + Labelled Subsystem KG (SpaceBERT token classification). "
+    "Analytics, coloring, export, filters."
+)
 
 # -----------------------------
 # Session state init
@@ -43,14 +149,18 @@ if "co_builder" not in st.session_state:
     st.session_state.co_builder = CooccurrenceGraphBuilder()
 
 if "labelled_builder" not in st.session_state:
+    # IMPORTANT: pass your actual fine-tuned model name/path if needed
+    # Example: LabelledSubsystemKGBuilder("path/to/your-finetuned-model")
     st.session_state.labelled_builder = LabelledSubsystemKGBuilder() if LabelledSubsystemKGBuilder else None
 
 if "last_input_text" not in st.session_state:
     st.session_state.last_input_text = ""
 
 if "last_raw_graph" not in st.session_state:
-    st.session_state.last_raw_graph = nx.DiGraph()
+    st.session_state.last_raw_graph = nx.Graph()
 
+if "last_graph_mode" not in st.session_state:
+    st.session_state.last_graph_mode = "Web Graph"
 
 # -----------------------------
 # Sidebar controls
@@ -62,8 +172,11 @@ with st.sidebar:
         "Graph Mode",
         ["Web Graph", "Labelled Subsystem KG"],
         index=0,
-        help="Web Graph: NER + co-occurrence. Labelled Subsystem KG: SpaceBERT assigns subsystem labels to nodes."
+        help="Web Graph: standard NER + co-occurrence. Labelled Subsystem KG: SpaceBERT labels nodes by subsystem.",
+        key="graph_mode_radio",
     )
+
+    st.session_state.last_graph_mode = graph_mode
 
     st.divider()
 
@@ -86,31 +199,26 @@ with st.sidebar:
             "UNKNOWN": st.checkbox("Show UNKNOWN", True, key="web_show_unknown"),
         }
     else:
-        # Subsystem labels (you can add/remove depending on your SpaceBERT tagset)
+        defaults = get_labelled_show_types()
         show_types = {
-            "TELECOM": st.checkbox("Show TELECOM", True, key="lab_show_telecom"),
-            "PROPULSION": st.checkbox("Show PROPULSION", True, key="lab_show_propulsion"),
-            "POWER": st.checkbox("Show POWER", True, key="lab_show_power"),
-            "THERMAL": st.checkbox("Show THERMAL", True, key="lab_show_thermal"),
-            "AOCS": st.checkbox("Show AOCS", True, key="lab_show_aocs"),
-            "PAYLOAD": st.checkbox("Show PAYLOAD", True, key="lab_show_payload"),
-            "GROUND": st.checkbox("Show GROUND", True, key="lab_show_ground"),
-            "DATA": st.checkbox("Show DATA", True, key="lab_show_data"),
-            "ORBIT": st.checkbox("Show ORBIT", True, key="lab_show_orbit"),
-            "CONCEPT": st.checkbox("Show CONCEPT", True, key="lab_show_concept"),
-            "OTHER": st.checkbox("Show OTHER", True, key="lab_show_other"),
-            "UNKNOWN": st.checkbox("Show UNKNOWN", True, key="lab_show_unknown"),
+            k: st.checkbox(f"Show {k}", defaults[k], key=f"lab_show_{k.lower()}")
+            for k in defaults.keys()
         }
+
+        # optional: show what model is loaded
+        if st.session_state.labelled_builder is None:
+            st.warning("LabelledSubsystemKGBuilder not available (missing module).")
+        else:
+            st.caption("Subsystem labels come from your SpaceBERT token classifier.")
 
     st.divider()
 
     if st.button("Clear Graph", key="clear_graph_button"):
         st.session_state.graph_manager.reset_graph()
         st.session_state.last_input_text = ""
-        st.session_state.last_raw_graph = nx.DiGraph()
+        st.session_state.last_raw_graph = nx.Graph()
         st.success("Graph cleared")
         st.rerun()
-
 
 # -----------------------------
 # Layout
@@ -128,10 +236,10 @@ with col_graph:
         height=230,
         placeholder=(
             "Example:\n"
-            "Atmospheric concentrations of CO2 and CH4 have been increasing...\n"
-            "ESA is preparing future Earth observation missions...\n"
+            "The CubeSat Telecom subsystem shall include a transmitter antenna and RF power amplifier.\n"
+            "The propulsion subsystem shall provide delta-v using cold gas thrusters.\n"
         ),
-        key="text_input_area"
+        key="text_input_area",
     )
 
     if st.button("Build Graph", key="build_graph_button"):
@@ -155,16 +263,21 @@ with col_graph:
                     edges_for_manager.append((u, label, v, confidence))
                 st.session_state.graph_manager.add_triples(edges_for_manager)
 
+                # Also store node types (best-effort) for exports/inspection
+                base_g = st.session_state.graph_manager.get_graph()
+                for n in base_g.nodes():
+                    base_g.nodes[n]["entity_type"] = "UNKNOWN"
+
             else:
                 if st.session_state.labelled_builder is None:
                     st.error(
                         "LabelledSubsystemKGBuilder not found. Create "
                         "`modules/extractors/labelled_subsystem_kg_builder.py` "
-                        "and implement LabelledSubsystemKGBuilder."
+                        "and add the class."
                     )
-                    raw_g = nx.DiGraph()
+                    raw_g = nx.Graph()
                 else:
-                    raw_g = st.session_state.labelled_builder.build(text_input)
+                    raw_g = st.session_state.labelled_builder.build(text_input, min_conf=0.0)
 
                     # store edges into GraphManager for exports
                     edges_for_manager = []
@@ -174,31 +287,28 @@ with col_graph:
                         edges_for_manager.append((u, label, v, confidence))
                     st.session_state.graph_manager.add_triples(edges_for_manager)
 
+                    # Copy node types from raw_g -> manager graph so exports include them
+                    base_g = st.session_state.graph_manager.get_graph()
+                    for n in base_g.nodes():
+                        base_g.nodes[n]["entity_type"] = "UNKNOWN"
+
+                    for n, attrs in raw_g.nodes(data=True):
+                        if n in base_g.nodes:
+                            t = attrs.get("entity_type") or "UNKNOWN"
+                            base_g.nodes[n]["entity_type"] = normalize_subsystem_label(t)
+
             st.session_state.last_raw_graph = raw_g
 
-            # Copy node types from raw_g -> manager graph so exports include types
             base_g = st.session_state.graph_manager.get_graph()
-            for n in base_g.nodes():
-                # default fallback if node did not exist in raw graph
-                base_g.nodes[n]["entity_type"] = "UNKNOWN"
-
-            for n, attrs in raw_g.nodes(data=True):
-                if n in base_g.nodes:
-                    if "entity_type" in attrs:
-                        base_g.nodes[n]["entity_type"] = attrs.get("entity_type") or "UNKNOWN"
-
             st.success(f"{graph_mode} built: {base_g.number_of_nodes()} nodes, {base_g.number_of_edges()} edges.")
 
     # -----------------------------
     # Build filtered visualization graph
     # -----------------------------
     base_g = st.session_state.graph_manager.get_graph()
-    raw_g = st.session_state.last_raw_graph
     viz = nx.DiGraph()
 
-    # Determine node types for filtering:
     if graph_mode == "Web Graph":
-        # Use EntityTyper (spaCy NER mapping) for web graph display types
         type_map = st.session_state.entity_typer.extract_types_from_text(st.session_state.last_input_text)
 
         for n in base_g.nodes():
@@ -207,14 +317,13 @@ with col_graph:
                 t = "LOC"
             if t not in show_types:
                 t = "UNKNOWN"
-
             if show_types.get(t, False):
                 viz.add_node(n, entity_type=t)
 
     else:
-        # Use SpaceBERT subsystem label stored on nodes (copied from raw_g)
         for n in base_g.nodes():
             t = base_g.nodes[n].get("entity_type", "UNKNOWN")
+            t = normalize_subsystem_label(t)
             if t not in show_types:
                 t = "UNKNOWN"
             if show_types.get(t, False):
@@ -234,40 +343,16 @@ with col_graph:
     if viz.number_of_nodes() > 0 and viz.number_of_edges() > 0:
         net = Network(height="600px", width="100%", bgcolor="#111111", font_color="white", directed=True)
 
-        if graph_mode == "Web Graph":
-            color_map = {
-                "PERSON": "#4C78A8",
-                "ORG": "#F58518",
-                "LOC": "#54A24B",
-                "PRODUCT": "#E45756",
-                "GAS": "#E45756",
-                "CONCEPT": "#B279A2",
-                "UNKNOWN": "#B0B0B0",
-            }
-        else:
-            color_map = {
-                "TELECOM": "#ff6b6b",
-                "PROPULSION": "#ffa94d",
-                "POWER": "#ffd43b",
-                "THERMAL": "#69db7c",
-                "AOCS": "#4dabf7",
-                "PAYLOAD": "#9775fa",
-                "GROUND": "#20c997",
-                "DATA": "#adb5bd",
-                "ORBIT": "#74c0fc",
-                "CONCEPT": "#b279a2",
-                "OTHER": "#888888",
-                "UNKNOWN": "#B0B0B0",
-            }
-
+        cmap = color_map_for_mode(graph_mode)
         degrees = dict(viz.degree())
+
         for node, attrs in viz.nodes(data=True):
             t = attrs.get("entity_type", "UNKNOWN")
             net.add_node(
                 node,
                 label=node,
                 size=12 + degrees.get(node, 0) * 5,
-                color=color_map.get(t, "#B0B0B0"),
+                color=cmap.get(t, "#B0B0B0"),
                 title=f"type: {t}",
             )
 
@@ -285,22 +370,35 @@ with col_graph:
                 title=f"{raw_label} (conf {conf:.2f})",
             )
 
-        # keep your physics similar to earlier (stable)
-        net.set_options("""
-        {
-          "physics": {
+        net.set_options(f"""
+        {{
+          "physics": {{
             "enabled": true,
             "solver": "forceAtlas2Based",
-            "stabilization": { "enabled": true, "iterations": 1000 }
-          }
-        }
+            "forceAtlas2Based": {{
+              "gravitationalConstant": -90,
+              "centralGravity": 0.03,
+              "springLength": 160,
+              "springConstant": 0.06,
+              "avoidOverlap": 1
+            }},
+            "stabilization": {{ "enabled": true, "iterations": 1000 }}
+          }},
+          "edges": {{
+            "smooth": {{ "enabled": true, "type": "dynamic" }},
+            "font": {{ "size": {14 if show_edge_labels else 0}, "align": "middle" }}
+          }},
+          "nodes": {{
+            "shape": "dot",
+            "font": {{ "size": 18 }}
+          }}
+        }}
         """)
 
         output_file = os.path.join(BASE_DIR, "graph_output.html")
         net.save_graph(output_file)
         with open(output_file, "r", encoding="utf-8") as f:
             components.html(f.read(), height=650)
-
     else:
         if base_g.number_of_nodes() == 0:
             st.info("Graph is empty. Paste text and click Build Graph.")
@@ -311,7 +409,6 @@ with col_graph:
                 st.write("Stored edges:", base_g.number_of_edges())
                 st.write("Shown nodes:", viz.number_of_nodes())
                 st.write("Shown edges:", viz.number_of_edges())
-
 
 # -----------------------------
 # Analytics / exports column
@@ -350,3 +447,4 @@ with col_side:
     st.download_button("Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
     st.download_button("Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
     st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
+
