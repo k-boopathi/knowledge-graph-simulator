@@ -174,16 +174,12 @@ def build_improved_graph(text: str, builder: LabelledSubsystemKGBuilder) -> nx.D
 
     return g
 
-
 def filter_graph(
     g: nx.DiGraph,
     label_key: str,
     show_types: dict,
     min_conf: float,
 ) -> nx.DiGraph:
-    """
-    Filters nodes by label_key and show_types, and edges by min_conf.
-    """
     viz = nx.DiGraph()
 
     # Nodes
@@ -191,8 +187,13 @@ def filter_graph(
         t = safe_label(attrs.get(label_key, "UNKNOWN"))
         if t not in show_types:
             t = "UNKNOWN"
+
         if show_types.get(t, False):
-            viz.add_node(n, entity_type=t, **attrs)
+            # avoid duplicate keyword args
+            clean_attrs = dict(attrs)
+            clean_attrs.pop("entity_type", None)  # always remove if present
+            viz.add_node(n, **clean_attrs)
+            viz.nodes[n]["entity_type"] = t  # enforce our filtered type
 
     # Edges
     for u, v, data in g.edges(data=True):
@@ -644,3 +645,4 @@ with col_side:
             ci = graph_to_csv_bytes(st.session_state.improved_graph)
             st.download_button("Download Improved JSON", data=ji, file_name="improved_graph.json", mime="application/json")
             st.download_button("Download Improved CSV", data=ci, file_name="improved_edges.csv", mime="text/csv")
+
