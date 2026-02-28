@@ -8,11 +8,13 @@ import networkx as nx
 import spacy
 
 
+# -----------------------------
+# Data containers
+# -----------------------------
 @dataclass
 class LabeledSpan:
     text: str
     subsystem: str
-    structure: str
     start: int
     end: int
     confidence: float = 0.60
@@ -22,17 +24,17 @@ class LabeledSpan:
 
 class LabelledSubsystemKGBuilder:
     """
-    Mission KG builder with TWO labels per node:
-      - subsystem_label: TELECOM/POWER/DATA/PAYLOAD/ORBIT/GROUND/PROPULSION/THERMAL/AOCS/...
-      - structure_label: MISSION/ORBIT/PAYLOAD/INSTRUMENT/GROUND/TARGET_REGION/PARAMETER/ORG/LOC/...
+    ESA-friendly subsystem KG builder.
 
-    Improvements vs previous version:
-      - safer mission-name heuristic (no random TitleCase -> MISSION)
-      - better canonicalization (lowercase, hyphen normalize, cheap singularization)
-      - expanded subsystem lexicon (your listed terms)
-      - relation extraction (has/uses/provides/measures + range/limit patterns)
-      - co-occurrence edges are HUB-based (no sentence cliques)
-      - node_kind + source stored for better visualization/debugging
+    Outputs ONE label per node:
+      - subsystem_label: TELECOM/POWER/DATA/PAYLOAD/ORBIT/GROUND/PROPULSION/THERMAL/AOCS/OTHER/UNKNOWN
+
+    Key features:
+      - ESA acronym + terminology tuned lexicon
+      - noun chunks + TitleCase phrases + regex anchors
+      - simple relation extraction (limits/ranges + have/use/provide/include)
+      - HUB-based co-occurrence (no sentence cliques)
+      - stable canonical node ids
     """
 
     def __init__(self, spacy_model: str = "en_core_web_sm", enable_noun_chunks: bool = True):
@@ -42,132 +44,104 @@ class LabelledSubsystemKGBuilder:
             self.nlp.add_pipe("sentencizer", first=True)
 
         self.enable_noun_chunks = enable_noun_chunks
-
-        # Used for safer mission heuristic
         self._raw_text: str = ""
 
         # -------------------------
-        # Subsystem label space (expanded)
+        # ESA-tuned subsystem lexicon
         # -------------------------
         self.subsystem_lexicon: Dict[str, List[str]] = {
             "TELECOM": [
-                "telecom", "telecommunication", "telecommunications", "ttc", "tt&c",
-                "downlink", "uplink", "x-band", "ka-band", "s-band",
-                "antenna", "transmitter", "receiver", "transceiver",
-                "rf", "radio frequency",
-                "link budget", "bit rate", "data rate", "telemetry",
-                "modulation", "bandwidth", "frequency",
-                "bpsk", "qpsk", "qam", "fec", "coding", "symbol rate", "carrier",
-                "lna", "pa", "amplifier", "filter", "diplexer", "duplexer",
-                "command", "commanding", "telecommand",
-                "downlink rate", "uplink rate",
+                "telemetry", "telecommand", "ttc", "tt&c", "tt & c",
+                "rf", "ranging", "doppler",
+                "transmitter", "receiver", "transceiver",
+                "antenna", "lna", "pa", "amplifier", "filter", "diplexer", "duplexer",
+                "downlink", "uplink", "link budget", "eirp", "g/t",
+                "x-band", "x band", "ka-band", "ka band", "s-band", "s band",
+                "bit rate", "data rate", "bandwidth", "frequency", "modulation", "coding", "fec",
+                "bpsk", "qpsk", "qam",
             ],
-            "PROPULSION": [
-                "propulsion", "thruster", "thrusters", "propellant", "propellants",
-                "tank", "tanks", "nozzle", "pressurant", "feed system",
-                "delta-v", "orbit raising", "station keeping",
-                "chemical propulsion", "electric propulsion",
-                "hydrazine", "xenon",
-                "hall thruster", "ion thruster", "monopropellant", "bipropellant",
-                "valve", "regulator", "blowdown",
+            "DATA": [
+                # on-board data handling + avionics buses (ESA style)
+                "cdhs", "c&dh", "command and data handling", "data handling", "obdh",
+                "on-board computer", "onboard computer", "obc", "avionics",
+                "mass memory", "ssmm", "solid state mass memory", "memory", "storage",
+                "packet", "packets", "compression", "data volume",
+                "spacewire", "spw", "can bus",
+                "mil-std-1553b", "mil-1553", "1553b",
+                "remote interface unit", "riu", "rtu",
+                # payload data handling and transmission
+                "pdht", "payload data handling", "payload data handling and transmission",
+                # ground processing products often mentioned in ESA docs
+                "processing chain", "level-0", "level-1", "level-1b", "level-2", "product generation",
             ],
             "POWER": [
-                "power", "eps", "electrical power subsystem",
-                "solar array", "solar arrays", "solar panel", "solar panels",
-                "solar cell", "solar cells",
+                "eps", "electrical power subsystem", "electrical power",
+                "solar array", "solar arrays", "solar panel", "solar panels", "solar cell", "solar cells",
                 "battery", "batteries",
-                "power distribution", "pdu", "pcdu", "power conditioning",
+                "pcdu", "pdu", "power distribution", "power conditioning",
                 "converter", "dc-dc", "dcdc", "regulator",
-                "bus", "power bus", "bus voltage", "pdu regulator",
-                "pdu", "pdu board",
+                "bus voltage", "power bus", "unregulated bus",
+                "28 v", "28v", "28-v", "28-vdc", "28 vdc",
+                "lcl", "lcls", "fcl", "fcls", "latching current limiter", "current limiter",
+                "pdu board",
             ],
             "THERMAL": [
-                "thermal", "thermal control", "thermal subsystem",
-                "radiator", "radiators", "radiator panel", "radiator panels",
-                "heater", "heaters", "insulation", "mli",
-                "temperature control", "cooling", "warming",
-                "heat pipe", "heat pipes", "thermal strap", "thermostat",
+                "thermal", "thermal control", "tcs",
+                "radiator", "radiators", "radiator panel",
+                "heater", "heaters", "heater line",
+                "mli", "insulation",
+                "heat pipe", "heat pipes", "thermal strap", "thermal doubler",
+                "thermistor", "thermostat",
+                "high emissivity", "coating", "louver",
+                "temperature",
             ],
             "AOCS": [
                 "aocs", "adcs", "attitude", "attitude control", "attitude determination",
-                "orbit determination", "od", "kalman filter",
-                "reaction wheel", "reaction wheels",
+                "orbit determination", "pointing", "slew",
+                "reaction wheel", "reaction wheels", "momentum wheel",
                 "star tracker", "star trackers",
-                "gyroscope", "gyroscopes", "gyro", "gyros",
-                "magnetorquer", "magnetorquers",
-                "magnetometer", "magnetometers",
+                "gyro", "gyroscope", "gyros",
+                "magnetorquer", "magnetorquers", "magnetometer",
                 "sun sensor", "sun sensors", "earth sensor", "earth sensors",
+                "gnss", "gps", "kalman filter",
             ],
-            "DATA": [
-                "data", "telemetry", "telecommand", "tm", "tc",
-                "onboard data handling", "data handling", "cdh", "obdh",
-                "onboard computer", "flight computer", "avionics",
-                "mass memory", "memory", "storage", "secure storage",
-                "processing", "onboard processing", "compression",
-                "data volume", "downlinked data", "packet", "packets",
+            "PROPULSION": [
+                "propulsion", "thruster", "thrusters",
+                "propellant", "propellants", "tank", "tanks",
+                "feed system", "nozzle", "valve", "valves",
+                "pressurant", "helium pressurant",
+                "hydrazine", "xenon",
+                "blow-down", "blow down",
+                "monopropellant", "bipropellant",
+                "delta-v", "Δv", "orbit raising", "station keeping",
+                "collision avoidance", "deorbit",
+                "hall thruster", "ion thruster", "ppu",
             ],
             "PAYLOAD": [
                 "payload", "instrument", "instruments",
-                "spectrometer", "imaging spectrometer", "radiometer",
+                "spectrometer", "radiometer", "imager", "imaging",
                 "lidar", "sar", "altimeter", "camera", "telescope",
                 "detector", "detectors",
             ],
             "GROUND": [
-                "ground", "ground segment", "ground station", "tracking station",
+                "ground segment", "ground station", "tracking station", "estrack",
                 "mission operations", "mission control",
-                "receiving station", "data centre", "data center",
-                "network", "antenna farm",
+                "operations centre", "operations center",
+                "fos", "focc", "pdgs", "fds", "mcs", "mission planning",
+                "kiruna", "svalbard", "ksat", "ssc",
+                "payload data ground segment",
             ],
             "ORBIT": [
-                "orbit", "sun-synchronous", "sun synchronous", "leo",
-                "low earth orbit", "near-polar", "inclination",
-                "ascending node", "raan", "altitude", "apogee", "perigee",
+                "orbit", "leo", "low earth orbit", "sso", "sun-synchronous", "sun synchronous",
+                "inclination", "altitude", "eccentricity", "raan",
+                "semi-major axis", "orbital period", "apogee", "perigee",
             ],
         }
 
-        # -------------------------
-        # Mission structure label space
-        # -------------------------
-        self.structure_lexicon: Dict[str, List[str]] = {
-            "MISSION": [
-                "mission", "mission candidate", "earth explorer", "phase 0", "phase a",
-                "selection", "candidate", "concept study", "spacecraft", "satellite",
-                "probe", "orbiter", "lander", "rover",
-            ],
-            "ORBIT": [
-                "orbit", "sun-synchronous", "sun synchronous", "leo",
-                "low earth orbit", "inclination", "ascending node", "altitude",
-                "apogee", "perigee", "raan",
-            ],
-            "PAYLOAD": [
-                "payload", "payload suite", "instrument", "instruments",
-            ],
-            "INSTRUMENT": [
-                "spectrometer", "radiometer", "lidar", "sar", "altimeter", "camera", "telescope",
-                "detector",
-            ],
-            "GROUND": [
-                "ground segment", "ground station", "tracking station",
-                "mission operations", "mission control",
-            ],
-            "TARGET_REGION": [
-                "thermosphere", "ionosphere", "upper atmosphere", "lower thermosphere",
-                "stratosphere", "troposphere", "mesosphere", "region",
-            ],
-            "PARAMETER": [
-                "altitude", "temperature", "density",
-                "flux", "heating", "radiance",
-                "bandwidth", "frequency", "bit rate", "data rate",
-                "voltage", "current", "power", "mass", "thrust",
-            ],
-            "SUBSYSTEM": [
-                "telecom subsystem", "power subsystem", "data handling subsystem",
-                "propulsion subsystem", "thermal subsystem", "aocs", "adcs",
-            ],
-            "ORG": [
-                "esa", "nasa", "jaxa", "isro", "cnes", "dlr",
-            ],
-        }
+        # Tie-break helpers (ESA overlaps)
+        self.ground_strong_cues = ["pdgs", "focc", "fos", "estrack", "kiruna", "svalbard", "mission planning", "ground segment"]
+        self.data_strong_cues = ["cdhs", "obc", "mass memory", "ssmm", "spacewire", "1553", "mil-std-1553", "pdht", "compression", "processing chain", "level-1", "level-2"]
+        self.telecom_strong_cues = ["tt&c", "ranging", "x-band", "s-band", "ka-band", "antenna", "rf", "transceiver"]
 
         # -------------------------
         # filtering junk chunks
@@ -180,21 +154,21 @@ class LabelledSubsystemKGBuilder:
             "a set", "the set", "the provision", "the pursuit",
             "the range", "the response", "the connection",
         }
-
         self.determiner_prefix = ("the ", "a ", "an ", "this ", "that ", "these ", "those ")
 
         # Regex patterns that are useful anchors (kept as nodes)
         self.token_patterns = [
             r"\b(?:sun-?synchronous|low earth orbit|leo|near-?polar)\b",
             r"\b\d{2,4}\s?km\b",
-            r"\bESA\b",
-            r"\bNASA\b",
-            r"\bEarth Explorer\b",
-            r"\bLiving Planet Programme\b",
+            r"\bMIL-STD-1553B\b",
+            r"\b(?:TT&C|CDHS|EPS|PCDU|PDHT|PDGS|FOCC|FOS|ESTRACK|SSMM)\b",
         ]
 
-        # Instrument keywords (used by special rules)
-        self.instrument_keywords = ["spectrometer", "radiometer", "lidar", "sar", "altimeter", "camera", "telescope", "detector"]
+        # Precompile lexicon patterns (fast boundary-ish matching)
+        self._compiled: Dict[str, List[re.Pattern]] = {
+            label: [self._compile_term(t) for t in terms]
+            for label, terms in self.subsystem_lexicon.items()
+        }
 
     # -----------------------------
     # Public
@@ -217,7 +191,6 @@ class LabelledSubsystemKGBuilder:
             if node in g:
                 if s.confidence > float(g.nodes[node].get("confidence", 0.0)):
                     g.nodes[node]["subsystem_label"] = s.subsystem
-                    g.nodes[node]["structure_label"] = s.structure
                     g.nodes[node]["confidence"] = float(s.confidence)
                     g.nodes[node]["node_kind"] = s.node_kind
                     g.nodes[node]["source"] = s.source
@@ -226,7 +199,6 @@ class LabelledSubsystemKGBuilder:
             g.add_node(
                 node,
                 subsystem_label=s.subsystem,
-                structure_label=s.structure,
                 confidence=float(s.confidence),
                 node_kind=s.node_kind,
                 source=s.source,
@@ -247,7 +219,6 @@ class LabelledSubsystemKGBuilder:
                         in_sent.append(node)
                         in_sent_conf[node] = max(in_sent_conf.get(node, 0.0), s.confidence)
 
-            # unique preserving order
             in_sent = list(dict.fromkeys(in_sent))
 
             # 1) Relation extraction (adds meaningful edges)
@@ -258,13 +229,11 @@ class LabelledSubsystemKGBuilder:
                 if not u2 or not v2 or u2 == v2:
                     continue
 
-                # Ensure relation object exists as node if it's not already
                 if v2 not in g:
-                    # relation objects may be numbers/values; treat as PARAMETER by default
+                    # values become nodes
                     g.add_node(
                         v2,
                         subsystem_label="OTHER",
-                        structure_label="PARAMETER" if self._looks_like_value(v2) else "OTHER",
                         confidence=float(conf),
                         node_kind="VALUE" if self._looks_like_value(v2) else "CONCEPT",
                         source="pattern",
@@ -276,28 +245,26 @@ class LabelledSubsystemKGBuilder:
 
             # 2) Co-occurrence edges (HUB-based, no cliques)
             if len(in_sent) >= 2:
-                # pick hub with highest confidence in sentence
                 hub = max(in_sent, key=lambda n: in_sent_conf.get(n, 0.0))
                 for n in in_sent:
                     if n == hub:
                         continue
                     self._add_edge(g, hub, n, "co-occurs", 0.35)
 
-        # Optional: remove isolated nodes (often junk)
+        # remove isolated nodes
         isolates = [n for n in g.nodes() if g.degree(n) == 0]
         g.remove_nodes_from(isolates)
 
         return g
 
     # -----------------------------
-    # Spans
+    # Span extraction
     # -----------------------------
     def extract_spans(self, doc, raw_text: str) -> List[LabeledSpan]:
         spans: List[LabeledSpan] = []
-
         ner_spans = [(e.start_char, e.end_char, e.label_, e.text) for e in doc.ents]
 
-        # 1) TitleCase sequences (keep, but no longer blindly treated as mission)
+        # 1) TitleCase phrases
         for m in re.finditer(r"\b(?:[A-Z][a-zA-Z0-9\-]+(?:\s+[A-Z][a-zA-Z0-9\-]+){0,4})\b", raw_text):
             txt = raw_text[m.start():m.end()]
             c = self.canon_display(txt)
@@ -308,9 +275,10 @@ class LabelledSubsystemKGBuilder:
             if low in {"accordingly", "answers", "complex", "region", "earth", "solar system"}:
                 continue
 
-            subsystem, structure, conf, kind, source = self.classify_span(c, m.start(), m.end(), ner_spans)
-            spans.append(LabeledSpan(text=c, subsystem=subsystem, structure=structure, start=m.start(), end=m.end(),
-                                     confidence=conf, node_kind=kind, source=source))
+            subsystem, conf, kind, source = self.classify_span(c, m.start(), m.end(), ner_spans)
+            if subsystem in {"UNKNOWN"}:
+                continue
+            spans.append(LabeledSpan(text=c, subsystem=subsystem, start=m.start(), end=m.end(), confidence=conf, node_kind=kind, source=source))
 
         # 2) noun chunks
         if self.enable_noun_chunks and doc.has_annotation("DEP"):
@@ -334,25 +302,22 @@ class LabelledSubsystemKGBuilder:
                 if len(c) < 3:
                     continue
 
-                subsystem, structure, conf, kind, source = self.classify_span(c, chunk.start_char, chunk.end_char, ner_spans)
-                if subsystem == "UNKNOWN" and structure == "UNKNOWN":
+                subsystem, conf, kind, source = self.classify_span(c, chunk.start_char, chunk.end_char, ner_spans)
+                if subsystem in {"UNKNOWN"}:
                     continue
+                spans.append(LabeledSpan(text=c, subsystem=subsystem, start=chunk.start_char, end=chunk.end_char, confidence=conf, node_kind=kind, source=source))
 
-                spans.append(LabeledSpan(text=c, subsystem=subsystem, structure=structure, start=chunk.start_char, end=chunk.end_char,
-                                         confidence=conf, node_kind=kind, source=source))
-
-        # 3) regex patterns
+        # 3) regex anchors
         for pat in self.token_patterns:
             for m in re.finditer(pat, raw_text, flags=re.I):
                 txt = raw_text[m.start():m.end()]
                 c = self.canon_display(txt)
                 if not c:
                     continue
-                subsystem, structure, conf, kind, source = self.classify_span(c, m.start(), m.end(), ner_spans)
-                spans.append(LabeledSpan(text=c, subsystem=subsystem, structure=structure, start=m.start(), end=m.end(),
-                                         confidence=conf, node_kind=kind, source=source))
+                subsystem, conf, kind, source = self.classify_span(c, m.start(), m.end(), ner_spans)
+                spans.append(LabeledSpan(text=c, subsystem=subsystem, start=m.start(), end=m.end(), confidence=conf, node_kind=kind, source=source))
 
-        # Dedup by canonical node id; keep max confidence
+        # dedup by canonical id
         best: Dict[str, LabeledSpan] = {}
         for s in spans:
             key = self.canon(s.text)
@@ -364,91 +329,45 @@ class LabelledSubsystemKGBuilder:
         return list(best.values())
 
     # -----------------------------
-    # Classification core
+    # Classification core (subsystem only)
     # -----------------------------
-    def classify_span(self, span_text: str, start: int, end: int, ner_spans) -> Tuple[str, str, float, str, str]:
+    def classify_span(self, span_text: str, start: int, end: int, ner_spans) -> Tuple[str, float, str, str]:
         low = span_text.lower()
 
-        # 0) NER override: protect ORG/LOC/PERSON
+        # NER override for ORG/LOC/PERSON: keep them as OTHER so they don't pollute subsystem graph
         ner = self._ner_override(start, end, ner_spans)
-        if ner == "ORG":
-            return "OTHER", "ORG", 0.88, "ORG", "ner"
-        if ner == "LOC":
-            return "OTHER", "LOC", 0.88, "LOC", "ner"
-        if ner == "PERSON":
-            return "OTHER", "OTHER", 0.75, "PERSON", "ner"
+        if ner in {"ORG", "LOC", "PERSON"}:
+            return "OTHER", 0.70, ner, "ner"
 
-        # 1) Subsystem score (weighted)
-        best_sub, best_sub_score = self._best_label(low, self.subsystem_lexicon)
-        subsystem = best_sub if best_sub_score >= 2 else "OTHER"
+        # Score lexicon on span itself
+        best_lab, best_hits = self._best_label(low)
 
-        # 2) Structure score (weighted)
-        best_struct, best_struct_score = self._best_label(low, self.structure_lexicon)
-        structure = best_struct if best_struct_score >= 2 else "OTHER"
+        # Sentence-aware tie-break (use window around the span)
+        window = self._context_window(start, end, self._raw_text, win=140)
+        best_lab = self._tie_break(best_lab, window, span_text)
 
-        # 3) Special rules
-
-        # numeric altitudes / values -> PARAMETER (structure) + ORBIT (subsystem if unknown)
-        if re.search(r"\b\d{2,4}\s?km\b", low) or self._looks_like_value(low):
-            structure = "PARAMETER"
-            if subsystem in {"OTHER", "UNKNOWN"}:
-                subsystem = "ORBIT"
-
-        # instrument words -> INSTRUMENT (structure) + PAYLOAD (subsystem)
-        if any(k in low for k in self.instrument_keywords):
-            structure = "INSTRUMENT"
-            subsystem = "PAYLOAD"
-
-        # safer mission heuristic: only if near mission cues
-        if structure in {"OTHER", "UNKNOWN"} and self._mission_like(span_text, self._raw_text):
-            structure = "MISSION"
-
-        # Decide node_kind
-        node_kind = "CONCEPT"
-        if structure == "ORG":
-            node_kind = "ORG"
-        elif structure == "LOC":
-            node_kind = "LOC"
-        elif structure == "PARAMETER":
-            node_kind = "PARAMETER"
-        elif structure == "INSTRUMENT":
-            node_kind = "INSTRUMENT"
-        elif structure == "MISSION":
-            node_kind = "MISSION"
-        elif structure == "GROUND":
-            node_kind = "GROUND_ASSET"
-        elif subsystem in {"TELECOM", "POWER", "DATA", "PROPULSION", "THERMAL", "AOCS"}:
-            node_kind = "SUBSYSTEM_TERM"
-
-        # confidence heuristic
-        score = max(best_sub_score, best_struct_score)
-        conf = 0.55
-        if score >= 7:
-            conf = 0.92
-        elif score >= 5:
-            conf = 0.85
-        elif score >= 3:
-            conf = 0.72
-        elif score >= 2:
-            conf = 0.65
+        # Confidence
+        if best_hits >= 4:
+            conf = 0.90
+        elif best_hits >= 2:
+            conf = 0.75
+        elif best_hits >= 1:
+            conf = 0.62
         else:
-            conf = 0.40
+            # allow orbit/value anchors to survive
+            if self._looks_like_value(low) or re.search(r"\b\d{2,4}\s?km\b", low):
+                return "ORBIT", 0.60, "PARAMETER", "pattern"
+            return "UNKNOWN", 0.30, "CONCEPT", "heuristic"
 
-        # If both ended up OTHER, return UNKNOWN-ish
-        if subsystem == "OTHER" and structure == "OTHER":
-            return "UNKNOWN", "UNKNOWN", 0.30, "CONCEPT", "heuristic"
-
-        source = "lexicon" if (best_sub_score >= 2 or best_struct_score >= 2) else "heuristic"
-        return subsystem, structure, conf, node_kind, source
+        # Node kind
+        kind = "SUBSYSTEM_TERM" if best_lab in {"TELECOM", "POWER", "DATA", "PROPULSION", "THERMAL", "AOCS", "GROUND", "ORBIT", "PAYLOAD"} else "CONCEPT"
+        source = "lexicon"
+        return best_lab, conf, kind, source
 
     # -----------------------------
-    # Relation Extraction
+    # Relation extraction
     # -----------------------------
     def extract_relations(self, sent, span_nodes: List[str]) -> List[Tuple[str, str, str, float]]:
-        """
-        Returns (subject, predicate, object, confidence).
-        Objects may be values; we will create VALUE nodes for them.
-        """
         rels: List[Tuple[str, str, str, float]] = []
         text = sent.text.strip()
         low = text.lower()
@@ -456,48 +375,37 @@ class LabelledSubsystemKGBuilder:
         if not span_nodes:
             return rels
 
-        # Range pattern: between A and B (with optional unit)
+        # Range: between A and B
         m = re.search(r"\bbetween\s+(\d+(?:\.\d+)?)\s*([a-zA-Z%°/]+)?\s+and\s+(\d+(?:\.\d+)?)\s*([a-zA-Z%°/]+)?\b", low)
         if m:
-            unit1 = m.group(2) or ""
-            unit2 = m.group(4) or ""
-            unit = unit1 if unit1 else unit2
+            unit = (m.group(2) or m.group(4) or "")
             vals = f"{m.group(1)}{unit}-{m.group(3)}{unit}"
             rels.append((span_nodes[0], "has_range", vals, 0.78))
 
-        # Max/limit pattern
+        # Max
         if any(k in low for k in ["no greater than", "at most", "maximum of", "not exceed", "≤", "<="]):
-            # Try to capture value after cue
             mv = re.search(r"(?:no greater than|at most|maximum of|not exceed|≤|<=)\s+(\d+(?:\.\d+)?)\s*([a-zA-Z%°/]+)?", low)
             if mv:
                 val = f"{mv.group(1)}{mv.group(2) or ''}"
                 rels.append((span_nodes[0], "has_limit_max", val, 0.80))
-            else:
-                rels.append((span_nodes[0], "has_limit_max", "max", 0.70))
 
-        # Min pattern
+        # Min
         if any(k in low for k in ["no less than", "at least", "minimum of", "≥", ">="]):
             mv = re.search(r"(?:no less than|at least|minimum of|≥|>=)\s+(\d+(?:\.\d+)?)\s*([a-zA-Z%°/]+)?", low)
             if mv:
                 val = f"{mv.group(1)}{mv.group(2) or ''}"
                 rels.append((span_nodes[0], "has_limit_min", val, 0.80))
 
-        # Verb-based relations using dependency parse
-        # (cheap and imperfect, but adds meaning)
+        # Verb relations (cheap)
         for token in sent:
             if token.lemma_ in {"have", "use", "provide", "measure", "include"}:
                 subj = [w for w in token.lefts if w.dep_ in {"nsubj", "nsubjpass"}]
-                if not subj:
-                    # sometimes subject is an ancestor
-                    subj = [w for w in token.ancestors if w.dep_ in {"ROOT"}]
-                # objects can be dobj/attr/pobj
                 objs = [w for w in token.rights if w.dep_ in {"dobj", "attr", "pobj", "dative", "oprd"}]
                 if not subj or not objs:
                     continue
 
                 s = subj[0].text
                 o = objs[0].text
-
                 pred = {
                     "have": "has_component",
                     "include": "has_component",
@@ -506,7 +414,6 @@ class LabelledSubsystemKGBuilder:
                     "measure": "measures",
                 }.get(token.lemma_, "related_to")
 
-                # Only add if at least one side is in known span nodes (prevents junk)
                 s_c = self.canon(s)
                 o_c = self.canon(o)
                 if (s_c in span_nodes) or (o_c in span_nodes):
@@ -515,31 +422,60 @@ class LabelledSubsystemKGBuilder:
         return rels
 
     # -----------------------------
-    # Scoring helpers
+    # Lexicon scoring + tie-break
     # -----------------------------
-    def _best_label(self, low: str, lex: Dict[str, List[str]]) -> Tuple[str, int]:
+    def _best_label(self, text_low: str) -> Tuple[str, int]:
         best_label = "OTHER"
-        best_score = 0
-        for lab, keys in lex.items():
-            score = self._score_keys(low, keys)
-            if score > best_score:
-                best_score = score
-                best_label = lab
-        return best_label, best_score
+        best_hits = 0
+        for label, patterns in self._compiled.items():
+            hits = 0
+            for pat in patterns:
+                if pat.search(text_low):
+                    hits += 1
+            if hits > best_hits:
+                best_hits = hits
+                best_label = label
+        return best_label, best_hits
 
-    def _score_keys(self, low: str, keys: List[str]) -> int:
-        score = 0
-        for k in keys:
-            k_low = k.lower().strip()
-            if not k_low:
-                continue
-            # +2 for boundary match, +1 for substring match
-            if re.search(rf"(?<!\w){re.escape(k_low)}(?!\w)", low):
-                score += 2
-            elif k_low in low:
-                score += 1
-        return score
+    def _tie_break(self, label: str, context: str, node_text: str) -> str:
+        s = (context or "").lower()
+        n = (node_text or "").lower()
 
+        # Ground beats telecom/data if strong ground cues exist
+        if label in {"TELECOM", "DATA", "GROUND"}:
+            if any(c in s for c in self.ground_strong_cues) or any(c in n for c in self.ground_strong_cues):
+                return "GROUND"
+
+        # DATA vs TELECOM overlap in ESA docs
+        if label in {"TELECOM", "DATA"}:
+            has_data = any(c in s for c in self.data_strong_cues) or any(c in n for c in self.data_strong_cues)
+            has_tel = any(c in s for c in self.telecom_strong_cues) or any(c in n for c in self.telecom_strong_cues)
+            if has_data and not has_tel:
+                return "DATA"
+            if has_tel and not has_data:
+                return "TELECOM"
+            if has_data and has_tel:
+                if any(k in n for k in ["rf", "antenna", "transceiver", "transmitter", "receiver", "x-band", "s-band", "ka-band"]):
+                    return "TELECOM"
+                return "DATA"
+
+        return label
+
+    def _compile_term(self, term: str) -> re.Pattern:
+        t = term.strip()
+        t_esc = re.escape(t)
+        t_esc = t_esc.replace(r"\-", r"[\-\s]?")
+        t_esc = t_esc.replace(r"\ ", r"\s+")
+        return re.compile(rf"(?<!\w){t_esc}(?!\w)", flags=re.I)
+
+    def _context_window(self, start: int, end: int, text: str, win: int = 140) -> str:
+        a0 = max(0, start - win)
+        a1 = min(len(text), end + win)
+        return text[a0:a1]
+
+    # -----------------------------
+    # NER + value helpers
+    # -----------------------------
     def _ner_override(self, start: int, end: int, ner_spans) -> Optional[str]:
         best = None
         best_overlap = 0
@@ -558,26 +494,7 @@ class LabelledSubsystemKGBuilder:
             return "PERSON"
         return None
 
-    # -----------------------------
-    # Mission heuristic
-    # -----------------------------
-    def _mission_like(self, span_text: str, raw_text: str) -> bool:
-        """
-        Safer mission-name heuristic:
-          - must look like a proper name token
-          - must be near mission cues in the text
-        """
-        if not re.fullmatch(r"[A-Z][a-zA-Z0-9\-]{2,}", span_text):
-            return False
-        cues = ["mission", "spacecraft", "satellite", "probe", "orbiter", "lander", "rover"]
-        idx = raw_text.find(span_text)
-        if idx < 0:
-            return False
-        window = raw_text[max(0, idx - 80): idx + 80].lower()
-        return any(c in window for c in cues)
-
     def _looks_like_value(self, txt: str) -> bool:
-        # numbers + optional unit
         return bool(re.search(r"\b\d+(?:\.\d+)?\s*(?:km|m|s|w|mw|kw|hz|khz|mhz|ghz|v|mv|a|ma|db|dbi|°c|c|%)\b", txt.lower()))
 
     # -----------------------------
@@ -589,7 +506,6 @@ class LabelledSubsystemKGBuilder:
         if g.has_edge(u, v):
             g[u][v]["weight"] = int(g[u][v].get("weight", 1)) + 1
             g[u][v]["confidence"] = float(min(1.0, float(g[u][v].get("confidence", 0.35)) + 0.05))
-            # prefer non-cooccurs predicate if present
             if g[u][v].get("predicate") == "co-occurs" and pred != "co-occurs":
                 g[u][v]["predicate"] = pred
                 g[u][v]["label"] = pred
@@ -600,46 +516,32 @@ class LabelledSubsystemKGBuilder:
     # Normalization
     # -----------------------------
     def canon(self, s: str) -> str:
-        """
-        Canonical node id:
-          - normalize whitespace
-          - normalize hyphens
-          - lowercase unless acronym-ish
-          - cheap singularization
-        """
         x = (s or "").strip()
         if not x:
             return ""
         x = re.sub(r"\s+", " ", x).strip(" ,.;:()[]{}\"'")
         x = x.replace("–", "-").replace("—", "-")
 
-        # Keep acronyms uppercase (ESA, RF, TT&C, etc.)
+        # Keep acronyms uppercase-ish
         if re.fullmatch(r"[A-Z0-9&\-]{2,}", x):
             pass
         else:
             x = x.lower()
 
-        # cheap singularization (avoid breaking "bus")
+        # cheap singularization (avoid "bus")
         if x.endswith("ies") and len(x) > 4:
             x = x[:-3] + "y"
         elif x.endswith("s") and len(x) > 4 and not x.endswith("ss") and not x.endswith("bus"):
             x = x[:-1]
-
         return x
 
     def canon_display(self, s: str) -> str:
-        """
-        Keeps a nice display string (trim), but does not force lowercase.
-        Node ids still use canon().
-        """
         x = (s or "").strip()
         if not x:
             return ""
         x = re.sub(r"\s+", " ", x).strip(" ,.;:()[]{}\"'")
-        # normalize unicode subscripts just in case
         sub_map = str.maketrans({
             "₀": "0", "₁": "1", "₂": "2", "₃": "3", "₄": "4",
             "₅": "5", "₆": "6", "₇": "7", "₈": "8", "₉": "9",
         })
-        x = x.translate(sub_map)
-        return x
+        return x.translate(sub_map)
