@@ -15,7 +15,7 @@ from modules.text_analytics import TextAnalytics
 from modules.entity_typer import EntityTyper
 from modules.export_utils import graph_to_json_bytes, graph_to_csv_bytes, graph_to_pdf_bytes
 from modules.cooccurrence_builder import CooccurrenceGraphBuilder
-
+from modules.extractors.pdf_text_extractor import PDFTextExtractor
 # -----------------------------
 # Labelled subsystem KG builder (ONE label: subsystem_label)
 # -----------------------------
@@ -413,3 +413,4 @@ with col_side:
     st.download_button("Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
     st.download_button("Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
     st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
+
