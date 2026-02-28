@@ -1,11 +1,17 @@
+# modules/extractors/labelled_subsystem_kg_builder.py
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
+import os
+import csv
+import json
 import re
 
 import networkx as nx
 import spacy
+
+from modules.ontology import Ontology  # uses the upgraded Ontology we created
 
 
 # -----------------------------
@@ -19,49 +25,63 @@ class LabeledSpan:
     end: int
     confidence: float = 0.60
     node_kind: str = "CONCEPT"
-    source: str = "heuristic"  # "ner" | "lexicon" | "pattern" | "heuristic"
+    source: str = "heuristic"  # "ner" | "lexicon" | "pattern" | "heuristic" | "acronym" | "science_vocab"
 
 
 class LabelledSubsystemKGBuilder:
     """
-    ESA-friendly subsystem KG builder.
+    ESA-friendly subsystem KG builder (Subsystem-only).
 
     Outputs ONE label per node:
       - subsystem_label: TELECOM/POWER/DATA/PAYLOAD/ORBIT/GROUND/PROPULSION/THERMAL/AOCS/OTHER/UNKNOWN
 
-    Key features:
-      - ESA acronym + terminology tuned lexicon
+    Adds ontology mapping per node:
+      - ontology_class, ontology_parent, ontology_conf, ontology_method
+
+    Uses:
+      - ESA subsystem lexicon (expanded)
+      - ESA acronym map (from data/vocab/esa_acronym_map.json)
+      - ESA science terms list (from data/vocab/esa_science_terms.csv)
       - noun chunks + TitleCase phrases + regex anchors
-      - simple relation extraction (limits/ranges + have/use/provide/include)
+      - relation extraction (limits/ranges + have/use/provide/include)
       - HUB-based co-occurrence (no sentence cliques)
-      - stable canonical node ids
+      - ontology edge validation (optional, conservative)
     """
 
-    def __init__(self, spacy_model: str = "en_core_web_sm", enable_noun_chunks: bool = True):
+    def __init__(
+        self,
+        spacy_model: str = "en_core_web_sm",
+        enable_noun_chunks: bool = True,
+        vocab_dir: Optional[str] = None,
+        enable_ontology_validation: bool = True,
+    ):
         # Keep parser + ner; disable lemmatizer for speed.
         self.nlp = spacy.load(spacy_model, disable=["lemmatizer"])
         if "sentencizer" not in self.nlp.pipe_names:
             self.nlp.add_pipe("sentencizer", first=True)
 
         self.enable_noun_chunks = enable_noun_chunks
+        self.enable_ontology_validation = enable_ontology_validation
+
         self._raw_text: str = ""
+        self.ontology = Ontology()
 
         # -------------------------
-        # ESA-tuned subsystem lexicon
+        # ESA-tuned subsystem lexicon (baseline)
+        # (will be further expanded by loaded science_terms if you want)
         # -------------------------
         self.subsystem_lexicon: Dict[str, List[str]] = {
             "TELECOM": [
                 "telemetry", "telecommand", "ttc", "tt&c", "tt & c",
                 "rf", "ranging", "doppler",
-                "transmitter", "receiver", "transceiver",
+                "transmitter", "receiver", "transceiver", "transponder", "modem",
                 "antenna", "lna", "pa", "amplifier", "filter", "diplexer", "duplexer",
                 "downlink", "uplink", "link budget", "eirp", "g/t",
                 "x-band", "x band", "ka-band", "ka band", "s-band", "s band",
                 "bit rate", "data rate", "bandwidth", "frequency", "modulation", "coding", "fec",
-                "bpsk", "qpsk", "qam",
+                "bpsk", "qpsk", "qam", "ccsds",
             ],
             "DATA": [
-                # on-board data handling + avionics buses (ESA style)
                 "cdhs", "c&dh", "command and data handling", "data handling", "obdh",
                 "on-board computer", "onboard computer", "obc", "avionics",
                 "mass memory", "ssmm", "solid state mass memory", "memory", "storage",
@@ -69,82 +89,85 @@ class LabelledSubsystemKGBuilder:
                 "spacewire", "spw", "can bus",
                 "mil-std-1553b", "mil-1553", "1553b",
                 "remote interface unit", "riu", "rtu",
-                # payload data handling and transmission
                 "pdht", "payload data handling", "payload data handling and transmission",
-                # ground processing products often mentioned in ESA docs
                 "processing chain", "level-0", "level-1", "level-1b", "level-2", "product generation",
+                "fdir", "fault detection", "fault isolation", "fault recovery",
             ],
             "POWER": [
                 "eps", "electrical power subsystem", "electrical power",
                 "solar array", "solar arrays", "solar panel", "solar panels", "solar cell", "solar cells",
-                "battery", "batteries",
+                "battery", "batteries", "battery assembly",
                 "pcdu", "pdu", "power distribution", "power conditioning",
-                "converter", "dc-dc", "dcdc", "regulator",
+                "converter", "dc-dc", "dcdc", "regulator", "mppt",
                 "bus voltage", "power bus", "unregulated bus",
                 "28 v", "28v", "28-v", "28-vdc", "28 vdc",
                 "lcl", "lcls", "fcl", "fcls", "latching current limiter", "current limiter",
-                "pdu board",
+                "power budget", "power consumption",
             ],
             "THERMAL": [
                 "thermal", "thermal control", "tcs",
-                "radiator", "radiators", "radiator panel",
-                "heater", "heaters", "heater line",
-                "mli", "insulation",
-                "heat pipe", "heat pipes", "thermal strap", "thermal doubler",
-                "thermistor", "thermostat",
-                "high emissivity", "coating", "louver",
-                "temperature",
+                "radiator", "radiators", "radiator panel", "radiator panels",
+                "heater", "heaters", "heater line", "heater lines", "htr",
+                "mli", "multi-layer insulation", "insulation",
+                "heat pipe", "heat pipes", "loop heat pipe", "lhp", "thermal strap", "thermal doubler",
+                "thermistor", "thermostat", "temperature sensor",
+                "high emissivity", "coating", "louver", "osr",
+                "temperature stability", "thermal dissipation",
             ],
             "AOCS": [
-                "aocs", "adcs", "attitude", "attitude control", "attitude determination",
-                "orbit determination", "pointing", "slew",
-                "reaction wheel", "reaction wheels", "momentum wheel",
-                "star tracker", "star trackers",
-                "gyro", "gyroscope", "gyros",
-                "magnetorquer", "magnetorquers", "magnetometer",
-                "sun sensor", "sun sensors", "earth sensor", "earth sensors",
+                "aocs", "adcs", "gnc",
+                "attitude", "attitude control", "attitude determination",
+                "orbit determination", "pointing", "slew", "stability", "jitter",
+                "reaction wheel", "reaction wheels", "momentum wheel", "rwa",
+                "star tracker", "star trackers", "str",
+                "gyro", "gyroscope", "gyros", "imu",
+                "magnetorquer", "magnetorquers", "magnetometer", "mtq",
+                "sun sensor", "sun sensors", "coarse sun sensor", "css",
+                "earth sensor", "earth sensors",
                 "gnss", "gps", "kalman filter",
             ],
             "PROPULSION": [
                 "propulsion", "thruster", "thrusters",
-                "propellant", "propellants", "tank", "tanks",
+                "propellant", "propellants", "propellant tank", "tank", "tanks",
                 "feed system", "nozzle", "valve", "valves",
-                "pressurant", "helium pressurant",
-                "hydrazine", "xenon",
+                "pressurant", "helium pressurant", "pressurization",
+                "hydrazine", "xenon", "mmh", "nto",
                 "blow-down", "blow down",
                 "monopropellant", "bipropellant",
                 "delta-v", "Δv", "orbit raising", "station keeping",
-                "collision avoidance", "deorbit",
-                "hall thruster", "ion thruster", "ppu",
+                "collision avoidance", "deorbit", "de-orbit",
+                "hall thruster", "ion thruster", "het", "rit", "ppu",
             ],
             "PAYLOAD": [
-                "payload", "instrument", "instruments",
+                "payload", "payload suite", "instrument", "instruments",
                 "spectrometer", "radiometer", "imager", "imaging",
                 "lidar", "sar", "altimeter", "camera", "telescope",
-                "detector", "detectors",
+                "detector", "detectors", "focal plane", "fpa",
+                "calibration", "science data", "measurement",
             ],
             "GROUND": [
                 "ground segment", "ground station", "tracking station", "estrack",
                 "mission operations", "mission control",
                 "operations centre", "operations center",
-                "fos", "focc", "pdgs", "fds", "mcs", "mission planning",
+                "fos", "focc", "pdgs", "fds", "mcs", "mps", "mission planning",
                 "kiruna", "svalbard", "ksat", "ssc",
-                "payload data ground segment",
+                "payload data ground segment", "flight operations segment", "flight dynamics",
             ],
             "ORBIT": [
-                "orbit", "leo", "low earth orbit", "sso", "sun-synchronous", "sun synchronous",
+                "orbit", "leo", "low earth orbit", "sso", "sun-synchronous", "sun synchronous", "near-polar",
                 "inclination", "altitude", "eccentricity", "raan",
                 "semi-major axis", "orbital period", "apogee", "perigee",
+                "ground track", "repeat cycle", "ltan", "local time of ascending node",
             ],
         }
 
         # Tie-break helpers (ESA overlaps)
-        self.ground_strong_cues = ["pdgs", "focc", "fos", "estrack", "kiruna", "svalbard", "mission planning", "ground segment"]
-        self.data_strong_cues = ["cdhs", "obc", "mass memory", "ssmm", "spacewire", "1553", "mil-std-1553", "pdht", "compression", "processing chain", "level-1", "level-2"]
-        self.telecom_strong_cues = ["tt&c", "ranging", "x-band", "s-band", "ka-band", "antenna", "rf", "transceiver"]
+        self.ground_strong_cues = ["pdgs", "focc", "fos", "estrack", "kiruna", "svalbard", "mission planning", "ground segment", "mcs", "mps", "fds"]
+        self.data_strong_cues = ["cdhs", "obc", "mass memory", "ssmm", "spacewire", "1553", "mil-std-1553", "pdht", "compression", "processing chain", "level-1", "level-2", "fdir"]
+        self.telecom_strong_cues = ["tt&c", "ranging", "x-band", "s-band", "ka-band", "antenna", "rf", "transceiver", "transponder", "downlink", "uplink"]
 
         # -------------------------
-        # filtering junk chunks
+        # Junk filtering
         # -------------------------
         self.stop_phrases = {
             "the mission", "the spacecraft", "the satellite", "the instrument",
@@ -161,12 +184,43 @@ class LabelledSubsystemKGBuilder:
             r"\b(?:sun-?synchronous|low earth orbit|leo|near-?polar)\b",
             r"\b\d{2,4}\s?km\b",
             r"\bMIL-STD-1553B\b",
-            r"\b(?:TT&C|CDHS|EPS|PCDU|PDHT|PDGS|FOCC|FOS|ESTRACK|SSMM)\b",
+            r"\b(?:TT&C|CDHS|EPS|PCDU|PDHT|PDGS|FOCC|FOS|ESTRACK|SSMM|OBC|RIU|RTU|LCL|MPPT)\b",
         ]
+
+        # -------------------------
+        # Load curated vocab files (recommended to commit in repo)
+        # -------------------------
+        # default vocab_dir = <project_root>/data/vocab
+        if vocab_dir is None:
+            # this file is modules/extractors/..., so go up 3 levels to project root
+            here = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.abspath(os.path.join(here, "..", ".."))
+            vocab_dir = os.path.join(project_root, "data", "vocab")
+
+        self.vocab_dir = vocab_dir
+        self.acronym_to_subsystem: Dict[str, str] = {}
+        self.acronym_expansions: Dict[str, str] = {}
+        self.science_terms: Dict[str, Tuple[str, float]] = {}  # term_low -> (subsystem, conf)
+
+        self._load_vocab_files(vocab_dir)
+
+        # Merge acronym subsystem mapping into fast override map
+        # (keep Ontology acronym_map too; this is for classifier)
+        # Map keys may contain punctuation; keep raw and also space-stripped variants
+        self._acronym_override: Dict[str, str] = {}
+        for acr, sub in self.acronym_to_subsystem.items():
+            self._acronym_override[acr.upper()] = sub
+            self._acronym_override[acr.upper().replace(" ", "")] = sub
+
+        # Optionally expand lexicon with science_terms (helps recall)
+        # (only add if term length >= 4 and not too generic)
+        for term_low, (sub, _) in self.science_terms.items():
+            if sub in self.subsystem_lexicon and len(term_low) >= 4 and term_low not in {"mission", "spacecraft", "system"}:
+                self.subsystem_lexicon[sub].append(term_low)
 
         # Precompile lexicon patterns (fast boundary-ish matching)
         self._compiled: Dict[str, List[re.Pattern]] = {
-            label: [self._compile_term(t) for t in terms]
+            label: [self._compile_term(t) for t in sorted(set(terms), key=lambda x: (-len(x), x))]
             for label, terms in self.subsystem_lexicon.items()
         }
 
@@ -206,6 +260,15 @@ class LabelledSubsystemKGBuilder:
                 end=int(s.end),
             )
 
+        # Ontology mapping for nodes (after node creation)
+        for n, attrs in g.nodes(data=True):
+            sub = attrs.get("subsystem_label", "UNKNOWN")
+            m = self.ontology.map_to_ontology(n, sub)
+            attrs["ontology_class"] = m.ontology_class
+            attrs["ontology_parent"] = m.parent_class
+            attrs["ontology_conf"] = float(m.confidence)
+            attrs["ontology_method"] = m.method
+
         # Edges
         for sent in doc.sents:
             a0, a1 = sent.start_char, sent.end_char
@@ -240,6 +303,12 @@ class LabelledSubsystemKGBuilder:
                         start=-1,
                         end=-1,
                     )
+                    # ontology map new node
+                    m = self.ontology.map_to_ontology(v2, g.nodes[v2].get("subsystem_label", "UNKNOWN"))
+                    g.nodes[v2]["ontology_class"] = m.ontology_class
+                    g.nodes[v2]["ontology_parent"] = m.parent_class
+                    g.nodes[v2]["ontology_conf"] = float(m.confidence)
+                    g.nodes[v2]["ontology_method"] = m.method
 
                 self._add_edge(g, u2, v2, pred, conf)
 
@@ -251,8 +320,12 @@ class LabelledSubsystemKGBuilder:
                         continue
                     self._add_edge(g, hub, n, "co-occurs", 0.35)
 
+        # Optional ontology validation pass (conservative)
+        if self.enable_ontology_validation:
+            self._validate_edges_with_ontology(g)
+
         # remove isolated nodes
-        isolates = [n for n in g.nodes() if g.degree(n) == 0]
+        isolates = [n for n in list(g.nodes()) if g.degree(n) == 0]
         g.remove_nodes_from(isolates)
 
         return g
@@ -264,7 +337,18 @@ class LabelledSubsystemKGBuilder:
         spans: List[LabeledSpan] = []
         ner_spans = [(e.start_char, e.end_char, e.label_, e.text) for e in doc.ents]
 
-        # 1) TitleCase phrases
+        # 0) Acronym tokens (high precision)
+        # Capture ALLCAPS+digits tokens like PCDU, SSMM, MIL-STD-1553B, TT&C
+        for m in re.finditer(r"\b[A-Z][A-Z0-9&/\-]{1,20}\b", raw_text):
+            txt = raw_text[m.start():m.end()]
+            c = self.canon_display(txt)
+            if not c:
+                continue
+            lab = self._acronym_override.get(c.upper(), None) or self._acronym_override.get(c.upper().replace(" ", ""), None)
+            if lab:
+                spans.append(LabeledSpan(text=c, subsystem=lab, start=m.start(), end=m.end(), confidence=0.92, node_kind="SUBSYSTEM_TERM", source="acronym"))
+
+        # 1) TitleCase phrases (mission/instrument names, headings, etc.)
         for m in re.finditer(r"\b(?:[A-Z][a-zA-Z0-9\-]+(?:\s+[A-Z][a-zA-Z0-9\-]+){0,4})\b", raw_text):
             txt = raw_text[m.start():m.end()]
             c = self.canon_display(txt)
@@ -276,7 +360,7 @@ class LabelledSubsystemKGBuilder:
                 continue
 
             subsystem, conf, kind, source = self.classify_span(c, m.start(), m.end(), ner_spans)
-            if subsystem in {"UNKNOWN"}:
+            if subsystem == "UNKNOWN":
                 continue
             spans.append(LabeledSpan(text=c, subsystem=subsystem, start=m.start(), end=m.end(), confidence=conf, node_kind=kind, source=source))
 
@@ -303,7 +387,7 @@ class LabelledSubsystemKGBuilder:
                     continue
 
                 subsystem, conf, kind, source = self.classify_span(c, chunk.start_char, chunk.end_char, ner_spans)
-                if subsystem in {"UNKNOWN"}:
+                if subsystem == "UNKNOWN":
                     continue
                 spans.append(LabeledSpan(text=c, subsystem=subsystem, start=chunk.start_char, end=chunk.end_char, confidence=conf, node_kind=kind, source=source))
 
@@ -315,9 +399,35 @@ class LabelledSubsystemKGBuilder:
                 if not c:
                     continue
                 subsystem, conf, kind, source = self.classify_span(c, m.start(), m.end(), ner_spans)
+                if subsystem == "UNKNOWN":
+                    continue
                 spans.append(LabeledSpan(text=c, subsystem=subsystem, start=m.start(), end=m.end(), confidence=conf, node_kind=kind, source=source))
 
-        # dedup by canonical id
+        # 4) science terms (from curated CSV) — high recall, controlled confidence
+        # We keep these even if noun_chunks miss them due to line breaks.
+        if self.science_terms:
+            raw_low = raw_text.lower()
+            for term_low, (sub, conf0) in self.science_terms.items():
+                if len(term_low) < 4:
+                    continue
+                # boundary-ish match
+                if re.search(rf"(?<!\w){re.escape(term_low)}(?!\w)", raw_low):
+                    # find first occurrence for span offsets (best effort)
+                    idx = raw_low.find(term_low)
+                    if idx >= 0:
+                        spans.append(
+                            LabeledSpan(
+                                text=raw_text[idx:idx + len(term_low)],
+                                subsystem=sub,
+                                start=idx,
+                                end=idx + len(term_low),
+                                confidence=min(0.88, max(0.60, conf0)),
+                                node_kind="SCI_TERM",
+                                source="science_vocab",
+                            )
+                        )
+
+        # dedup by canonical id; keep max confidence
         best: Dict[str, LabeledSpan] = {}
         for s in spans:
             key = self.canon(s.text)
@@ -332,21 +442,32 @@ class LabelledSubsystemKGBuilder:
     # Classification core (subsystem only)
     # -----------------------------
     def classify_span(self, span_text: str, start: int, end: int, ner_spans) -> Tuple[str, float, str, str]:
-        low = span_text.lower()
+        low = span_text.lower().strip()
 
-        # NER override for ORG/LOC/PERSON: keep them as OTHER so they don't pollute subsystem graph
+        # 0) Acronym override (highest precision)
+        up = span_text.strip().upper()
+        sub = self._acronym_override.get(up) or self._acronym_override.get(up.replace(" ", ""))
+        if sub:
+            return sub, 0.92, "SUBSYSTEM_TERM", "acronym"
+
+        # 1) NER override for ORG/LOC/PERSON: keep them as OTHER so they don't pollute subsystem graph
         ner = self._ner_override(start, end, ner_spans)
         if ner in {"ORG", "LOC", "PERSON"}:
             return "OTHER", 0.70, ner, "ner"
 
-        # Score lexicon on span itself
+        # 2) Science vocab direct hit (strong-ish)
+        if low in self.science_terms:
+            sub2, c0 = self.science_terms[low]
+            return sub2, float(min(0.88, max(0.60, c0))), "SCI_TERM", "science_vocab"
+
+        # 3) Score lexicon on span itself
         best_lab, best_hits = self._best_label(low)
 
-        # Sentence-aware tie-break (use window around the span)
-        window = self._context_window(start, end, self._raw_text, win=140)
+        # 4) Sentence-aware tie-break (use window around the span)
+        window = self._context_window(start, end, self._raw_text, win=160)
         best_lab = self._tie_break(best_lab, window, span_text)
 
-        # Confidence
+        # 5) Confidence
         if best_hits >= 4:
             conf = 0.90
         elif best_hits >= 2:
@@ -359,10 +480,8 @@ class LabelledSubsystemKGBuilder:
                 return "ORBIT", 0.60, "PARAMETER", "pattern"
             return "UNKNOWN", 0.30, "CONCEPT", "heuristic"
 
-        # Node kind
         kind = "SUBSYSTEM_TERM" if best_lab in {"TELECOM", "POWER", "DATA", "PROPULSION", "THERMAL", "AOCS", "GROUND", "ORBIT", "PAYLOAD"} else "CONCEPT"
-        source = "lexicon"
-        return best_lab, conf, kind, source
+        return best_lab, conf, kind, "lexicon"
 
     # -----------------------------
     # Relation extraction
@@ -455,7 +574,7 @@ class LabelledSubsystemKGBuilder:
             if has_tel and not has_data:
                 return "TELECOM"
             if has_data and has_tel:
-                if any(k in n for k in ["rf", "antenna", "transceiver", "transmitter", "receiver", "x-band", "s-band", "ka-band"]):
+                if any(k in n for k in ["rf", "antenna", "transceiver", "transmitter", "receiver", "x-band", "s-band", "ka-band", "transponder"]):
                     return "TELECOM"
                 return "DATA"
 
@@ -468,7 +587,7 @@ class LabelledSubsystemKGBuilder:
         t_esc = t_esc.replace(r"\ ", r"\s+")
         return re.compile(rf"(?<!\w){t_esc}(?!\w)", flags=re.I)
 
-    def _context_window(self, start: int, end: int, text: str, win: int = 140) -> str:
+    def _context_window(self, start: int, end: int, text: str, win: int = 160) -> str:
         a0 = max(0, start - win)
         a1 = min(len(text), end + win)
         return text[a0:a1]
@@ -495,7 +614,7 @@ class LabelledSubsystemKGBuilder:
         return None
 
     def _looks_like_value(self, txt: str) -> bool:
-        return bool(re.search(r"\b\d+(?:\.\d+)?\s*(?:km|m|s|w|mw|kw|hz|khz|mhz|ghz|v|mv|a|ma|db|dbi|°c|c|%)\b", txt.lower()))
+        return bool(re.search(r"\b\d+(?:\.\d+)?\s*(?:km|m|s|ms|w|mw|kw|hz|khz|mhz|ghz|v|mv|a|ma|db|dbi|kbps|mbps|gbps|kbit/s|mbit/s|gbit/s|°c|c|k|%)\b", txt.lower()))
 
     # -----------------------------
     # Graph edge helper
@@ -512,6 +631,27 @@ class LabelledSubsystemKGBuilder:
         else:
             g.add_edge(u, v, predicate=pred, label=pred, weight=1, confidence=float(conf))
 
+    def _validate_edges_with_ontology(self, g: nx.Graph) -> None:
+        """
+        Conservative validation:
+        - If an edge predicate is not valid under (subj_subsystem, predicate, obj_subsystem/VALUE),
+          downgrade confidence and/or turn into co-occurs (keeping connectivity but reducing noise).
+        """
+        for u, v, data in list(g.edges(data=True)):
+            pred = str(data.get("predicate") or data.get("label") or "co-occurs")
+            su = g.nodes[u].get("subsystem_label", "UNKNOWN")
+            sv = g.nodes[v].get("subsystem_label", "UNKNOWN")
+            obj_type = "VALUE" if g.nodes[v].get("node_kind") == "VALUE" else sv
+
+            if pred == "co-occurs":
+                continue
+
+            if not self.ontology.is_valid(su, pred, obj_type):
+                # degrade
+                data["confidence"] = float(min(0.25, float(data.get("confidence", 0.35))))
+                data["predicate"] = "co-occurs"
+                data["label"] = "co-occurs"
+
     # -----------------------------
     # Normalization
     # -----------------------------
@@ -523,7 +663,7 @@ class LabelledSubsystemKGBuilder:
         x = x.replace("–", "-").replace("—", "-")
 
         # Keep acronyms uppercase-ish
-        if re.fullmatch(r"[A-Z0-9&\-]{2,}", x):
+        if re.fullmatch(r"[A-Z0-9&/\-]{2,}", x):
             pass
         else:
             x = x.lower()
@@ -545,3 +685,63 @@ class LabelledSubsystemKGBuilder:
             "₅": "5", "₆": "6", "₇": "7", "₈": "8", "₉": "9",
         })
         return x.translate(sub_map)
+
+    # -----------------------------
+    # Vocab loading
+    # -----------------------------
+    def _load_vocab_files(self, vocab_dir: str) -> None:
+        """
+        Loads:
+          - data/vocab/esa_acronym_map.json
+          - data/vocab/esa_science_terms.csv
+
+        Expected acronym json structure:
+          { "TELECOM": { "TT&C": "expansion", ... }, "POWER": {...}, ... }
+
+        Expected science csv:
+          term,subsystem,confidence
+        """
+        if not vocab_dir or not os.path.isdir(vocab_dir):
+            return
+
+        # Acronym JSON
+        acr_path = os.path.join(vocab_dir, "esa_acronym_map.json")
+        if os.path.exists(acr_path):
+            try:
+                with open(acr_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    for subsystem, acrs in data.items():
+                        sub = (subsystem or "").upper().strip()
+                        if not isinstance(acrs, dict):
+                            continue
+                        for acr, expansion in acrs.items():
+                            if not acr:
+                                continue
+                            a = str(acr).strip().upper()
+                            self.acronym_to_subsystem[a] = sub
+                            if expansion:
+                                self.acronym_expansions[a] = str(expansion).strip()
+            except Exception:
+                # silent fail by design; app should still run without vocab
+                pass
+
+        # Science terms CSV
+        sci_path = os.path.join(vocab_dir, "esa_science_terms.csv")
+        if os.path.exists(sci_path):
+            try:
+                with open(sci_path, "r", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        term = (row.get("term") or "").strip()
+                        sub = (row.get("subsystem") or "").strip().upper()
+                        conf_s = (row.get("confidence") or "").strip()
+                        if not term or not sub:
+                            continue
+                        try:
+                            conf = float(conf_s) if conf_s else 0.75
+                        except Exception:
+                            conf = 0.75
+                        self.science_terms[term.lower()] = (sub, float(conf))
+            except Exception:
+                pass
