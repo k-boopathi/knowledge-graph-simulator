@@ -1,4 +1,3 @@
-# app.py
 from __future__ import annotations
 
 import os
@@ -14,7 +13,6 @@ import streamlit.components.v1 as components
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(BASE_DIR)
 
-from modules.graph_manager import GraphManager
 from modules.graph_analytics import GraphAnalytics
 from modules.text_analytics import TextAnalytics
 from modules.entity_typer import EntityTyper
@@ -107,24 +105,18 @@ def get_show_types_subsystem() -> dict:
     }
 
 
-def write_temp_pdf(uploaded_file) -> str:
-    # Keep a stable temp file for the current run
+def write_temp_pdf_bytes(pdf_bytes: bytes) -> str:
+    """Write bytes to a temp PDF and return path."""
     fd, path = tempfile.mkstemp(suffix=".pdf")
     os.close(fd)
     with open(path, "wb") as f:
-        f.write(uploaded_file.read())
+        f.write(pdf_bytes)
     return path
 
 
 def build_baseline_graph(text: str, co_builder: CooccurrenceGraphBuilder, entity_typer: EntityTyper) -> nx.DiGraph:
-    """
-    Baseline = co-occurrence builder + entity typer for node types.
-    Returns a directed graph with node attribute: entity_type
-    and edge attributes: predicate/label/confidence/weight if present.
-    """
     raw_g = co_builder.build(text)
 
-    # Move into a directed graph
     g = nx.DiGraph()
     for n in raw_g.nodes():
         g.add_node(n)
@@ -136,7 +128,6 @@ def build_baseline_graph(text: str, co_builder: CooccurrenceGraphBuilder, entity
         if "confidence" not in g[u][v]:
             g[u][v]["confidence"] = float(g[u][v].get("weight", 0.30))
 
-    # Type nodes
     type_map = entity_typer.extract_types_from_text(text)
     for n in list(g.nodes()):
         t = entity_typer.type_for_node(n, type_map)
@@ -150,10 +141,6 @@ def build_baseline_graph(text: str, co_builder: CooccurrenceGraphBuilder, entity
 
 
 def build_improved_graph(text: str, builder: LabelledSubsystemKGBuilder) -> nx.DiGraph:
-    """
-    Improved = LabelledSubsystemKGBuilder (subsystem labels, ontology fields).
-    Returns a directed graph with node attribute: subsystem_label (+ confidence, node_kind, source, ontology_*)
-    """
     raw_g = builder.build(text, min_conf=0.0)
 
     g = nx.DiGraph()
@@ -167,12 +154,12 @@ def build_improved_graph(text: str, builder: LabelledSubsystemKGBuilder) -> nx.D
         if "confidence" not in g[u][v]:
             g[u][v]["confidence"] = float(g[u][v].get("weight", 0.35))
 
-    # normalize labels
     for n in list(g.nodes()):
         g.nodes[n]["subsystem_label"] = safe_label(g.nodes[n].get("subsystem_label", "UNKNOWN"))
         g.nodes[n]["confidence"] = float(g.nodes[n].get("confidence", 0.0))
 
     return g
+
 
 def filter_graph(
     g: nx.DiGraph,
@@ -182,20 +169,17 @@ def filter_graph(
 ) -> nx.DiGraph:
     viz = nx.DiGraph()
 
-    # Nodes
     for n, attrs in g.nodes(data=True):
         t = safe_label(attrs.get(label_key, "UNKNOWN"))
         if t not in show_types:
             t = "UNKNOWN"
 
         if show_types.get(t, False):
-            # avoid duplicate keyword args
             clean_attrs = dict(attrs)
-            clean_attrs.pop("entity_type", None)  # always remove if present
+            clean_attrs.pop("entity_type", None)
             viz.add_node(n, **clean_attrs)
-            viz.nodes[n]["entity_type"] = t  # enforce our filtered type
+            viz.nodes[n]["entity_type"] = t
 
-    # Edges
     for u, v, data in g.edges(data=True):
         conf = float(data.get("confidence", data.get("weight", 0.30)))
         if conf < min_conf:
@@ -215,9 +199,6 @@ def render_pyvis_graph(
     html_path: str,
     cmap: dict,
 ):
-    """
-    Renders g_viz with PyVis, pulling per-node confidence from g_full.
-    """
     if g_viz.number_of_nodes() == 0 or g_viz.number_of_edges() == 0:
         st.info("Graph built but filtered out. Lower min confidence or enable more types.")
         with st.expander("Debug info"):
@@ -235,7 +216,6 @@ def render_pyvis_graph(
         node_conf = float(g_full.nodes[node].get("confidence", 0.0)) if node in g_full.nodes else 0.0
         node_label = f"{node}\n[{t}]"
 
-        # Tooltip: include ontology if present
         tooltip_parts = [f"type: {t}", f"confidence: {node_conf:.2f}"]
         for k in ["node_kind", "source", "ontology_class", "ontology_parent", "ontology_conf", "ontology_method"]:
             if k in g_full.nodes.get(node, {}):
@@ -304,6 +284,7 @@ st.caption(
     "Includes PDF mode, comparison mode, analytics, and exports."
 )
 
+
 # -----------------------------
 # Session state init
 # -----------------------------
@@ -328,6 +309,19 @@ if "baseline_graph" not in st.session_state:
 if "improved_graph" not in st.session_state:
     st.session_state.improved_graph = nx.DiGraph()
 
+# PDF caching for Streamlit reruns
+if "pdf_tmp_path" not in st.session_state:
+    st.session_state.pdf_tmp_path = None
+if "pdf_raw_text" not in st.session_state:
+    st.session_state.pdf_raw_text = ""
+if "pdf_cleaned_text" not in st.session_state:
+    st.session_state.pdf_cleaned_text = ""
+if "pdf_pages_read" not in st.session_state:
+    st.session_state.pdf_pages_read = 0
+if "pdf_removed_lines" not in st.session_state:
+    st.session_state.pdf_removed_lines = 0
+
+
 # -----------------------------
 # Sidebar controls
 # -----------------------------
@@ -348,15 +342,11 @@ with st.sidebar:
     )
 
     st.divider()
-
     min_conf = st.slider("Min confidence", 0.0, 1.0, 0.20, 0.05)
     show_edge_labels = st.checkbox("Show edge labels", value=True)
 
     st.divider()
-
     st.subheader("Filters")
-    if compare_mode:
-        st.caption("Filters apply to both graphs (each uses its own label type).")
 
     show_types_web_defaults = get_show_types_web()
     show_types_sub_defaults = get_show_types_subsystem()
@@ -374,7 +364,6 @@ with st.sidebar:
         }
 
     st.divider()
-
     if st.button("Clear Graphs"):
         st.session_state.last_input_text = ""
         st.session_state.baseline_graph = nx.DiGraph()
@@ -382,16 +371,17 @@ with st.sidebar:
         st.success("Cleared.")
         st.rerun()
 
-    # Missing-module warnings
     if input_mode == "PDF (ESA)" and st.session_state.pdf_extractor is None:
         st.warning("PDFTextExtractor not available. Add modules/extractors/pdf_text_extractor.py and esa_pdf_cleaner.py.")
     if st.session_state.labelled_builder is None:
         st.warning("LabelledSubsystemKGBuilder not available. Add modules/extractors/labelled_subsystem_kg_builder.py.")
 
+
 # -----------------------------
 # Layout
 # -----------------------------
 col_graph, col_side = st.columns([3, 2])
+
 
 # -----------------------------
 # Input + build
@@ -399,58 +389,82 @@ col_graph, col_side = st.columns([3, 2])
 with col_graph:
     st.subheader("Input")
 
-    text_input = ""
+    source_text = ""  # <-- IMPORTANT: this is what Build uses
 
     if input_mode == "PDF (ESA)":
         pdf_file = st.file_uploader("Upload ESA PDF", type=["pdf"])
         c1, c2 = st.columns(2)
         with c1:
-            page_from = st.number_input("Page start (0-index)", min_value=0, value=0, step=1)
+            page_from = st.number_input("Page start (0-index)", min_value=0, value=10, step=1)
         with c2:
-            page_to = st.number_input("Page end (exclusive, 0 = all)", min_value=0, value=0, step=1)
+            page_to = st.number_input("Page end (exclusive, 0 = all)", min_value=0, value=30, step=1)
 
+        # Extract immediately on upload/range change (cached in session_state)
         if pdf_file is not None and st.session_state.pdf_extractor is not None:
-            tmp_path = write_temp_pdf(pdf_file)
+            # bytes once
+            pdf_bytes = pdf_file.getvalue()
+
+            # only rewrite temp file if changed
+            pdf_sig = (pdf_file.name, len(pdf_bytes))
+            if st.session_state.get("pdf_sig") != pdf_sig:
+                st.session_state.pdf_sig = pdf_sig
+                st.session_state.pdf_tmp_path = write_temp_pdf_bytes(pdf_bytes)
+
             page_to_val = None if int(page_to) == 0 else int(page_to)
 
-            res = st.session_state.pdf_extractor.extract(tmp_path, page_from=int(page_from), page_to=page_to_val)
-            text_input = res.cleaned_text
+            res = st.session_state.pdf_extractor.extract(
+                st.session_state.pdf_tmp_path,
+                page_from=int(page_from),
+                page_to=page_to_val,
+            )
 
-            st.caption(f"Pages read: {res.pages_read} | Removed header/footer lines: {res.removed_lines_count}")
+            st.session_state.pdf_raw_text = res.raw_text
+            st.session_state.pdf_cleaned_text = res.cleaned_text
+            st.session_state.pdf_pages_read = res.pages_read
+            st.session_state.pdf_removed_lines = res.removed_lines_count
+
+            source_text = st.session_state.pdf_cleaned_text
+
+            st.caption(
+                f"Pages read: {st.session_state.pdf_pages_read} | "
+                f"Removed header/footer lines: {st.session_state.pdf_removed_lines}"
+            )
 
             with st.expander("Preview: RAW text (first 1500 chars)"):
-                st.text(res.raw_text[:1500])
+                st.text(st.session_state.pdf_raw_text[:1500])
 
             with st.expander("Preview: CLEANED text (first 1500 chars)"):
-                st.text(res.cleaned_text[:1500])
+                st.text(st.session_state.pdf_cleaned_text[:1500])
+
+        else:
+            source_text = ""
 
     else:
-        text_input = st.text_area(
+        pasted = st.text_area(
             "Paste text:",
             height=230,
             placeholder="Paste ESA mission text here…",
             key="text_input_area",
         )
+        source_text = (pasted or "").strip()
 
     build_clicked = st.button("Build Graph(s)")
 
     if build_clicked:
-        if not (text_input or "").strip():
+        if not (source_text or "").strip():
             st.warning("Please provide some text (paste or PDF) first.")
         else:
-            st.session_state.last_input_text = text_input
+            st.session_state.last_input_text = source_text
 
-            # Baseline graph
             if compare_mode:
                 st.session_state.baseline_graph = build_baseline_graph(
-                    text_input,
+                    source_text,
                     st.session_state.co_builder,
                     st.session_state.entity_typer,
                 )
 
-            # Improved graph
             if st.session_state.labelled_builder is not None:
-                st.session_state.improved_graph = build_improved_graph(text_input, st.session_state.labelled_builder)
+                st.session_state.improved_graph = build_improved_graph(source_text, st.session_state.labelled_builder)
             else:
                 st.session_state.improved_graph = nx.DiGraph()
 
@@ -470,12 +484,9 @@ with col_graph:
     st.divider()
     st.subheader("Graph Visualization")
 
-    out_html = os.path.join(BASE_DIR, "graph_output.html")
-
     if compare_mode:
         left, right = st.columns(2)
 
-        # Baseline
         with left:
             st.markdown("### Baseline (Web Graph)")
             g_base = st.session_state.baseline_graph
@@ -497,7 +508,6 @@ with col_graph:
                     cmap=color_map_web(),
                 )
 
-        # Improved
         with right:
             st.markdown("### Improved (Subsystem KG)")
             g_imp = st.session_state.improved_graph
@@ -534,9 +544,10 @@ with col_graph:
                 g_viz=viz_imp,
                 label_key="subsystem_label",
                 show_edge_labels=show_edge_labels,
-                html_path=out_html,
+                html_path=os.path.join(BASE_DIR, "graph_output.html"),
                 cmap=color_map_subsystem(),
             )
+
 
 # -----------------------------
 # Analytics / exports
@@ -555,7 +566,6 @@ with col_side:
         st.write("Paste text or upload a PDF and build graphs.")
 
     st.divider()
-
     st.subheader("Graph Analytics")
 
     def show_graph_metrics(title: str, g: nx.DiGraph, label_key: str):
@@ -590,7 +600,6 @@ with col_side:
         else:
             st.info("Improved graph not built yet.")
 
-        # Quick deltas (if both exist)
         if compute_metrics is not None and gb.number_of_nodes() and gi.number_of_nodes():
             mb = compute_metrics(gb, label_key="entity_type")
             mi = compute_metrics(gi, label_key="subsystem_label")
@@ -608,7 +617,6 @@ with col_side:
     st.divider()
     st.subheader("Exports")
 
-    # Choose which graph to export by default
     export_graph = st.session_state.improved_graph if st.session_state.improved_graph.number_of_nodes() else st.session_state.baseline_graph
 
     if export_graph.number_of_nodes() == 0:
@@ -626,7 +634,6 @@ with col_side:
         st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
 
         if compute_metrics is not None and metrics_to_dict is not None:
-            # infer label key
             label_key = "subsystem_label" if "subsystem_label" in next(iter(export_graph.nodes(data=True)))[1] else "entity_type"
             m = compute_metrics(export_graph, label_key=label_key)
             metrics_json = json.dumps(metrics_to_dict(m), indent=2).encode("utf-8")
@@ -645,4 +652,3 @@ with col_side:
             ci = graph_to_csv_bytes(st.session_state.improved_graph)
             st.download_button("Download Improved JSON", data=ji, file_name="improved_graph.json", mime="application/json")
             st.download_button("Download Improved CSV", data=ci, file_name="improved_edges.csv", mime="text/csv")
-
