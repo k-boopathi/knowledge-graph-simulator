@@ -1,5 +1,10 @@
+# app.py
+from __future__ import annotations
+
 import os
 import sys
+import json
+import tempfile
 
 import streamlit as st
 import networkx as nx
@@ -15,51 +20,50 @@ from modules.text_analytics import TextAnalytics
 from modules.entity_typer import EntityTyper
 from modules.export_utils import graph_to_json_bytes, graph_to_csv_bytes, graph_to_pdf_bytes
 from modules.cooccurrence_builder import CooccurrenceGraphBuilder
-from modules.extractors.pdf_text_extractor import PDFTextExtractor
-# -----------------------------
-# Labelled subsystem KG builder (ONE label: subsystem_label)
-# -----------------------------
+
+# Labelled (subsystem-only) KG builder
 try:
     from modules.extractors.labelled_subsystem_kg_builder import LabelledSubsystemKGBuilder
 except Exception:
     LabelledSubsystemKGBuilder = None
 
+# ESA PDF cleaner/extractor
+try:
+    from modules.extractors.pdf_text_extractor import PDFTextExtractor
+except Exception:
+    PDFTextExtractor = None
+
+# Metrics
+try:
+    from modules.evaluation_metrics import compute_metrics, metrics_to_dict
+except Exception:
+    compute_metrics = None
+    metrics_to_dict = None
+
 
 # -----------------------------
 # Helpers
 # -----------------------------
-def get_labelled_show_types() -> dict:
-    """
-    Default filters for subsystem labels.
-    """
+def safe_label(x: str) -> str:
+    s = (x or "").strip()
+    if not s or s.upper() == "O":
+        return "UNKNOWN"
+    return s.upper() if len(s) <= 32 else "UNKNOWN"
+
+
+def color_map_web() -> dict:
     return {
-        "TELECOM": True,
-        "POWER": True,
-        "DATA": True,
-        "PAYLOAD": True,
-        "ORBIT": True,
-        "GROUND": True,
-        "PROPULSION": True,
-        "THERMAL": True,
-        "AOCS": True,
-        "OTHER": True,
-        "UNKNOWN": True,
+        "PERSON": "#4C78A8",
+        "ORG": "#F58518",
+        "LOC": "#54A24B",
+        "PRODUCT": "#E45756",
+        "GAS": "#E45756",
+        "CONCEPT": "#B279A2",
+        "UNKNOWN": "#B0B0B0",
     }
 
 
-def color_map_for_mode(mode: str) -> dict:
-    if mode == "Web Graph":
-        return {
-            "PERSON": "#4C78A8",
-            "ORG": "#F58518",
-            "LOC": "#54A24B",
-            "PRODUCT": "#E45756",
-            "GAS": "#E45756",
-            "CONCEPT": "#B279A2",
-            "UNKNOWN": "#B0B0B0",
-        }
-
-    # Labelled Subsystem KG colors
+def color_map_subsystem() -> dict:
     return {
         "TELECOM": "#ff6b6b",
         "POWER": "#ffd43b",
@@ -75,14 +79,218 @@ def color_map_for_mode(mode: str) -> dict:
     }
 
 
-def safe_label(x: str) -> str:
+def get_show_types_web() -> dict:
+    return {
+        "PERSON": True,
+        "ORG": True,
+        "LOC": True,
+        "PRODUCT": True,
+        "GAS": True,
+        "CONCEPT": True,
+        "UNKNOWN": True,
+    }
+
+
+def get_show_types_subsystem() -> dict:
+    return {
+        "TELECOM": True,
+        "POWER": True,
+        "DATA": True,
+        "PAYLOAD": True,
+        "ORBIT": True,
+        "GROUND": True,
+        "PROPULSION": True,
+        "THERMAL": True,
+        "AOCS": True,
+        "OTHER": True,
+        "UNKNOWN": True,
+    }
+
+
+def write_temp_pdf(uploaded_file) -> str:
+    # Keep a stable temp file for the current run
+    fd, path = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    with open(path, "wb") as f:
+        f.write(uploaded_file.read())
+    return path
+
+
+def build_baseline_graph(text: str, co_builder: CooccurrenceGraphBuilder, entity_typer: EntityTyper) -> nx.DiGraph:
     """
-    Normalizes empty/None labels.
+    Baseline = co-occurrence builder + entity typer for node types.
+    Returns a directed graph with node attribute: entity_type
+    and edge attributes: predicate/label/confidence/weight if present.
     """
-    s = (x or "").strip()
-    if not s or s.upper() == "O":
-        return "UNKNOWN"
-    return s.upper() if len(s) <= 32 else "UNKNOWN"
+    raw_g = co_builder.build(text)
+
+    # Move into a directed graph
+    g = nx.DiGraph()
+    for n in raw_g.nodes():
+        g.add_node(n)
+
+    for u, v, data in raw_g.edges(data=True):
+        g.add_edge(u, v, **data)
+        if not g[u][v].get("label"):
+            g[u][v]["label"] = g[u][v].get("predicate", "co-occurs")
+        if "confidence" not in g[u][v]:
+            g[u][v]["confidence"] = float(g[u][v].get("weight", 0.30))
+
+    # Type nodes
+    type_map = entity_typer.extract_types_from_text(text)
+    for n in list(g.nodes()):
+        t = entity_typer.type_for_node(n, type_map)
+        if t in ("GPE", "FAC"):
+            t = "LOC"
+        if t not in get_show_types_web():
+            t = "UNKNOWN"
+        g.nodes[n]["entity_type"] = t
+
+    return g
+
+
+def build_improved_graph(text: str, builder: LabelledSubsystemKGBuilder) -> nx.DiGraph:
+    """
+    Improved = LabelledSubsystemKGBuilder (subsystem labels, ontology fields).
+    Returns a directed graph with node attribute: subsystem_label (+ confidence, node_kind, source, ontology_*)
+    """
+    raw_g = builder.build(text, min_conf=0.0)
+
+    g = nx.DiGraph()
+    for n, attrs in raw_g.nodes(data=True):
+        g.add_node(n, **attrs)
+
+    for u, v, data in raw_g.edges(data=True):
+        g.add_edge(u, v, **data)
+        if not g[u][v].get("label"):
+            g[u][v]["label"] = g[u][v].get("predicate", "co-occurs")
+        if "confidence" not in g[u][v]:
+            g[u][v]["confidence"] = float(g[u][v].get("weight", 0.35))
+
+    # normalize labels
+    for n in list(g.nodes()):
+        g.nodes[n]["subsystem_label"] = safe_label(g.nodes[n].get("subsystem_label", "UNKNOWN"))
+        g.nodes[n]["confidence"] = float(g.nodes[n].get("confidence", 0.0))
+
+    return g
+
+
+def filter_graph(
+    g: nx.DiGraph,
+    label_key: str,
+    show_types: dict,
+    min_conf: float,
+) -> nx.DiGraph:
+    """
+    Filters nodes by label_key and show_types, and edges by min_conf.
+    """
+    viz = nx.DiGraph()
+
+    # Nodes
+    for n, attrs in g.nodes(data=True):
+        t = safe_label(attrs.get(label_key, "UNKNOWN"))
+        if t not in show_types:
+            t = "UNKNOWN"
+        if show_types.get(t, False):
+            viz.add_node(n, entity_type=t, **attrs)
+
+    # Edges
+    for u, v, data in g.edges(data=True):
+        conf = float(data.get("confidence", data.get("weight", 0.30)))
+        if conf < min_conf:
+            continue
+        if u not in viz.nodes or v not in viz.nodes:
+            continue
+        viz.add_edge(u, v, **data)
+
+    return viz
+
+
+def render_pyvis_graph(
+    g_full: nx.DiGraph,
+    g_viz: nx.DiGraph,
+    label_key: str,
+    show_edge_labels: bool,
+    html_path: str,
+    cmap: dict,
+):
+    """
+    Renders g_viz with PyVis, pulling per-node confidence from g_full.
+    """
+    if g_viz.number_of_nodes() == 0 or g_viz.number_of_edges() == 0:
+        st.info("Graph built but filtered out. Lower min confidence or enable more types.")
+        with st.expander("Debug info"):
+            st.write("Stored nodes:", g_full.number_of_nodes())
+            st.write("Stored edges:", g_full.number_of_edges())
+            st.write("Shown nodes:", g_viz.number_of_nodes())
+            st.write("Shown edges:", g_viz.number_of_edges())
+        return
+
+    net = Network(height="600px", width="100%", bgcolor="#111111", font_color="white", directed=True)
+    degrees = dict(g_viz.degree())
+
+    for node, attrs in g_viz.nodes(data=True):
+        t = safe_label(attrs.get(label_key, attrs.get("entity_type", "UNKNOWN")))
+        node_conf = float(g_full.nodes[node].get("confidence", 0.0)) if node in g_full.nodes else 0.0
+        node_label = f"{node}\n[{t}]"
+
+        # Tooltip: include ontology if present
+        tooltip_parts = [f"type: {t}", f"confidence: {node_conf:.2f}"]
+        for k in ["node_kind", "source", "ontology_class", "ontology_parent", "ontology_conf", "ontology_method"]:
+            if k in g_full.nodes.get(node, {}):
+                tooltip_parts.append(f"{k}: {g_full.nodes[node].get(k)}")
+        title = "<br>".join(tooltip_parts)
+
+        net.add_node(
+            node,
+            label=node_label,
+            size=12 + degrees.get(node, 0) * 5,
+            color=cmap.get(t, "#B0B0B0"),
+            title=title,
+        )
+
+    for u, v, data in g_viz.edges(data=True):
+        raw_label = str(data.get("label") or data.get("predicate") or "related")
+        conf = float(data.get("confidence", data.get("weight", 0.30)))
+        width = 1 + min(6, conf * 6)
+
+        net.add_edge(
+            u,
+            v,
+            label=raw_label if show_edge_labels else "",
+            width=width,
+            arrows="to",
+            title=f"{raw_label} (conf {conf:.2f})",
+        )
+
+    net.set_options(f"""
+    {{
+      "physics": {{
+        "enabled": true,
+        "solver": "forceAtlas2Based",
+        "forceAtlas2Based": {{
+          "gravitationalConstant": -90,
+          "centralGravity": 0.03,
+          "springLength": 160,
+          "springConstant": 0.06,
+          "avoidOverlap": 1
+        }},
+        "stabilization": {{ "enabled": true, "iterations": 1000 }}
+      }},
+      "edges": {{
+        "smooth": {{ "enabled": true, "type": "dynamic" }},
+        "font": {{ "size": {14 if show_edge_labels else 0}, "align": "middle" }}
+      }},
+      "nodes": {{
+        "shape": "dot",
+        "font": {{ "size": 18 }}
+      }}
+    }}
+    """)
+
+    net.save_graph(html_path)
+    with open(html_path, "r", encoding="utf-8") as f:
+        components.html(f.read(), height=650)
 
 
 # -----------------------------
@@ -91,16 +299,13 @@ def safe_label(x: str) -> str:
 st.set_page_config(page_title="Knowledge Graph Simulator", layout="wide")
 st.title("Knowledge Graph Simulator")
 st.caption(
-    "Web Graph (NER + co-occurrence) + Labelled Subsystem KG (ESA-tuned subsystem labels). "
-    "Analytics, coloring, export, filters."
+    "Baseline (NER + co-occurrence) vs Improved (ESA-cleaned text + subsystem labelling + ontology mapping). "
+    "Includes PDF mode, comparison mode, analytics, and exports."
 )
 
 # -----------------------------
 # Session state init
 # -----------------------------
-if "graph_manager" not in st.session_state:
-    st.session_state.graph_manager = GraphManager()
-
 if "entity_typer" not in st.session_state:
     st.session_state.entity_typer = EntityTyper()
 
@@ -110,11 +315,17 @@ if "co_builder" not in st.session_state:
 if "labelled_builder" not in st.session_state:
     st.session_state.labelled_builder = LabelledSubsystemKGBuilder() if LabelledSubsystemKGBuilder else None
 
+if "pdf_extractor" not in st.session_state:
+    st.session_state.pdf_extractor = PDFTextExtractor() if PDFTextExtractor else None
+
 if "last_input_text" not in st.session_state:
     st.session_state.last_input_text = ""
 
-if "last_raw_graph" not in st.session_state:
-    st.session_state.last_raw_graph = nx.Graph()
+if "baseline_graph" not in st.session_state:
+    st.session_state.baseline_graph = nx.DiGraph()
+
+if "improved_graph" not in st.session_state:
+    st.session_state.improved_graph = nx.DiGraph()
 
 # -----------------------------
 # Sidebar controls
@@ -122,58 +333,59 @@ if "last_raw_graph" not in st.session_state:
 with st.sidebar:
     st.header("Controls")
 
-    graph_mode = st.radio(
-        "Graph Mode",
-        ["Web Graph", "Labelled Subsystem KG"],
+    input_mode = st.radio(
+        "Input Mode",
+        ["Paste Text", "PDF (ESA)"],
         index=0,
-        help="Web Graph: standard NER + co-occurrence. Labelled Subsystem KG: ESA-tuned subsystem labels assigned to nodes.",
-        key="graph_mode_radio",
+        help="PDF mode uses ESA PDF cleaner (header/footer removal + line reflow).",
+    )
+
+    compare_mode = st.checkbox(
+        "Comparison Mode (Baseline vs Improved)",
+        value=True,
+        help="Build and show two graphs side-by-side: Baseline (co-occurrence) vs Improved (subsystem labels + ontology).",
     )
 
     st.divider()
 
-    min_conf = st.slider("Min confidence", 0.0, 1.0, 0.20, 0.05, key="min_conf_slider")
-    show_edge_labels = st.checkbox("Show edge labels", value=True, key="show_edge_labels")
+    min_conf = st.slider("Min confidence", 0.0, 1.0, 0.20, 0.05)
+    show_edge_labels = st.checkbox("Show edge labels", value=True)
 
     st.divider()
 
-    # -----------------------------
-    # Type Filters
-    # -----------------------------
-    if graph_mode == "Web Graph":
-        show_types = {
-            "PERSON": st.checkbox("Show PERSON", True, key="web_show_person"),
-            "ORG": st.checkbox("Show ORG", True, key="web_show_org"),
-            "LOC": st.checkbox("Show LOC", True, key="web_show_loc"),
-            "PRODUCT": st.checkbox("Show PRODUCT", True, key="web_show_product"),
-            "GAS": st.checkbox("Show GAS", True, key="web_show_gas"),
-            "CONCEPT": st.checkbox("Show CONCEPT", True, key="web_show_concept"),
-            "UNKNOWN": st.checkbox("Show UNKNOWN", True, key="web_show_unknown"),
-        }
-    else:
-        defaults = get_labelled_show_types()
-        show_types = {
-            k: st.checkbox(f"Show {k}", defaults[k], key=f"lab_show_subsystem_{k.lower()}")
-            for k in defaults.keys()
+    st.subheader("Filters")
+    if compare_mode:
+        st.caption("Filters apply to both graphs (each uses its own label type).")
+
+    show_types_web_defaults = get_show_types_web()
+    show_types_sub_defaults = get_show_types_subsystem()
+
+    with st.expander("Baseline types (Web Graph)", expanded=False):
+        show_types_web = {
+            k: st.checkbox(f"Show {k}", show_types_web_defaults[k], key=f"web_show_{k.lower()}")
+            for k in show_types_web_defaults.keys()
         }
 
-        if st.session_state.labelled_builder is None:
-            st.warning("LabelledSubsystemKGBuilder not available (missing module).")
-            st.caption(
-                "Create: modules/extractors/labelled_subsystem_kg_builder.py\n"
-                "and define LabelledSubsystemKGBuilder."
-            )
-        else:
-            st.caption("Labels come from the labelled subsystem KG builder.")
+    with st.expander("Improved types (Subsystem)", expanded=True):
+        show_types_sub = {
+            k: st.checkbox(f"Show {k}", show_types_sub_defaults[k], key=f"sub_show_{k.lower()}")
+            for k in show_types_sub_defaults.keys()
+        }
 
     st.divider()
 
-    if st.button("Clear Graph", key="clear_graph_button"):
-        st.session_state.graph_manager.reset_graph()
+    if st.button("Clear Graphs"):
         st.session_state.last_input_text = ""
-        st.session_state.last_raw_graph = nx.Graph()
-        st.success("Graph cleared")
+        st.session_state.baseline_graph = nx.DiGraph()
+        st.session_state.improved_graph = nx.DiGraph()
+        st.success("Cleared.")
         st.rerun()
+
+    # Missing-module warnings
+    if input_mode == "PDF (ESA)" and st.session_state.pdf_extractor is None:
+        st.warning("PDFTextExtractor not available. Add modules/extractors/pdf_text_extractor.py and esa_pdf_cleaner.py.")
+    if st.session_state.labelled_builder is None:
+        st.warning("LabelledSubsystemKGBuilder not available. Add modules/extractors/labelled_subsystem_kg_builder.py.")
 
 # -----------------------------
 # Layout
@@ -181,207 +393,156 @@ with st.sidebar:
 col_graph, col_side = st.columns([3, 2])
 
 # -----------------------------
-# Graph column
+# Input + build
 # -----------------------------
 with col_graph:
-    st.subheader("Graph Visualization")
+    st.subheader("Input")
 
-    text_input = st.text_area(
-        "Paste text:",
-        height=230,
-        placeholder=(
-            "Example:\n"
-            "The overall system electrical architecture integrates CDHS, EPS, PDHT and TT&C.\n"
-            "The TT&C subsystem uses an S-band link with low-gain antennas.\n"
-        ),
-        key="text_input_area",
-    )
+    text_input = ""
 
-    if st.button("Build Graph", key="build_graph_button"):
-        if not text_input.strip():
-            st.warning("Please paste some text first.")
+    if input_mode == "PDF (ESA)":
+        pdf_file = st.file_uploader("Upload ESA PDF", type=["pdf"])
+        c1, c2 = st.columns(2)
+        with c1:
+            page_from = st.number_input("Page start (0-index)", min_value=0, value=0, step=1)
+        with c2:
+            page_to = st.number_input("Page end (exclusive, 0 = all)", min_value=0, value=0, step=1)
+
+        if pdf_file is not None and st.session_state.pdf_extractor is not None:
+            tmp_path = write_temp_pdf(pdf_file)
+            page_to_val = None if int(page_to) == 0 else int(page_to)
+
+            res = st.session_state.pdf_extractor.extract(tmp_path, page_from=int(page_from), page_to=page_to_val)
+            text_input = res.cleaned_text
+
+            st.caption(f"Pages read: {res.pages_read} | Removed header/footer lines: {res.removed_lines_count}")
+
+            with st.expander("Preview: RAW text (first 1500 chars)"):
+                st.text(res.raw_text[:1500])
+
+            with st.expander("Preview: CLEANED text (first 1500 chars)"):
+                st.text(res.cleaned_text[:1500])
+
+    else:
+        text_input = st.text_area(
+            "Paste text:",
+            height=230,
+            placeholder="Paste ESA mission text here…",
+            key="text_input_area",
+        )
+
+    build_clicked = st.button("Build Graph(s)")
+
+    if build_clicked:
+        if not (text_input or "").strip():
+            st.warning("Please provide some text (paste or PDF) first.")
         else:
             st.session_state.last_input_text = text_input
-            st.session_state.graph_manager.reset_graph()
 
-            if graph_mode == "Web Graph":
-                raw_g = st.session_state.co_builder.build(text_input)
+            # Baseline graph
+            if compare_mode:
+                st.session_state.baseline_graph = build_baseline_graph(
+                    text_input,
+                    st.session_state.co_builder,
+                    st.session_state.entity_typer,
+                )
 
-                edges_for_manager = []
-                for u, v, data in raw_g.edges(data=True):
-                    label = str(data.get("label") or data.get("predicate") or "co-occurs")
-                    confidence = float(data.get("confidence", 0.30))
-                    edges_for_manager.append((u, label, v, confidence))
-                st.session_state.graph_manager.add_triples(edges_for_manager)
-
-                base_g = st.session_state.graph_manager.get_graph()
-                # Store entity_type for export too
-                type_map = st.session_state.entity_typer.extract_types_from_text(st.session_state.last_input_text)
-                for n in base_g.nodes():
-                    t = st.session_state.entity_typer.type_for_node(n, type_map)
-                    if t in ("GPE", "FAC"):
-                        t = "LOC"
-                    base_g.nodes[n]["entity_type"] = t if t else "UNKNOWN"
-
+            # Improved graph
+            if st.session_state.labelled_builder is not None:
+                st.session_state.improved_graph = build_improved_graph(text_input, st.session_state.labelled_builder)
             else:
-                if st.session_state.labelled_builder is None:
-                    st.error(
-                        "LabelledSubsystemKGBuilder not found. Create "
-                        "`modules/extractors/labelled_subsystem_kg_builder.py` "
-                        "and add the class."
-                    )
-                    raw_g = nx.Graph()
-                else:
-                    raw_g = st.session_state.labelled_builder.build(text_input, min_conf=0.0)
+                st.session_state.improved_graph = nx.DiGraph()
 
-                    edges_for_manager = []
-                    for u, v, data in raw_g.edges(data=True):
-                        label = str(data.get("label") or data.get("predicate") or "co-occurs")
-                        confidence = float(data.get("confidence", 0.40))
-                        edges_for_manager.append((u, label, v, confidence))
-                    st.session_state.graph_manager.add_triples(edges_for_manager)
+            if compare_mode:
+                st.success(
+                    f"Built baseline: {st.session_state.baseline_graph.number_of_nodes()} nodes, "
+                    f"{st.session_state.baseline_graph.number_of_edges()} edges | "
+                    f"improved: {st.session_state.improved_graph.number_of_nodes()} nodes, "
+                    f"{st.session_state.improved_graph.number_of_edges()} edges."
+                )
+            else:
+                st.success(
+                    f"Built improved: {st.session_state.improved_graph.number_of_nodes()} nodes, "
+                    f"{st.session_state.improved_graph.number_of_edges()} edges."
+                )
 
-                    # Copy subsystem labels into base_g node attributes for visualization/export
-                    base_g = st.session_state.graph_manager.get_graph()
-                    for n in base_g.nodes():
-                        base_g.nodes[n]["subsystem_label"] = "UNKNOWN"
-                        base_g.nodes[n]["confidence"] = float(base_g.nodes[n].get("confidence", 0.0))
+    st.divider()
+    st.subheader("Graph Visualization")
 
-                    for n, attrs in raw_g.nodes(data=True):
-                        if n in base_g.nodes:
-                            base_g.nodes[n]["subsystem_label"] = safe_label(attrs.get("subsystem_label", "UNKNOWN"))
-                            if "confidence" in attrs:
-                                base_g.nodes[n]["confidence"] = float(attrs.get("confidence", 0.0))
-                            # optional metadata if present
-                            if "node_kind" in attrs:
-                                base_g.nodes[n]["node_kind"] = attrs.get("node_kind")
-                            if "source" in attrs:
-                                base_g.nodes[n]["source"] = attrs.get("source")
+    out_html = os.path.join(BASE_DIR, "graph_output.html")
 
-            st.session_state.last_raw_graph = raw_g
-            base_g = st.session_state.graph_manager.get_graph()
-            st.success(f"{graph_mode} built: {base_g.number_of_nodes()} nodes, {base_g.number_of_edges()} edges.")
+    if compare_mode:
+        left, right = st.columns(2)
 
-    # -----------------------------
-    # Build filtered visualization graph
-    # -----------------------------
-    base_g = st.session_state.graph_manager.get_graph()
-    viz = nx.DiGraph()
+        # Baseline
+        with left:
+            st.markdown("### Baseline (Web Graph)")
+            g_base = st.session_state.baseline_graph
+            if g_base.number_of_nodes() == 0:
+                st.info("Baseline graph is empty. Build graphs first.")
+            else:
+                viz_base = filter_graph(
+                    g_base,
+                    label_key="entity_type",
+                    show_types=show_types_web,
+                    min_conf=min_conf,
+                )
+                render_pyvis_graph(
+                    g_full=g_base,
+                    g_viz=viz_base,
+                    label_key="entity_type",
+                    show_edge_labels=show_edge_labels,
+                    html_path=os.path.join(BASE_DIR, "baseline_graph.html"),
+                    cmap=color_map_web(),
+                )
 
-    if graph_mode == "Web Graph":
-        type_map = st.session_state.entity_typer.extract_types_from_text(st.session_state.last_input_text)
-
-        for n in base_g.nodes():
-            t = st.session_state.entity_typer.type_for_node(n, type_map)
-            if t in ("GPE", "FAC"):
-                t = "LOC"
-            if t not in show_types:
-                t = "UNKNOWN"
-            if show_types.get(t, False):
-                viz.add_node(n, entity_type=t)
-
+        # Improved
+        with right:
+            st.markdown("### Improved (Subsystem KG)")
+            g_imp = st.session_state.improved_graph
+            if g_imp.number_of_nodes() == 0:
+                st.info("Improved graph is empty. Build graphs first.")
+            else:
+                viz_imp = filter_graph(
+                    g_imp,
+                    label_key="subsystem_label",
+                    show_types=show_types_sub,
+                    min_conf=min_conf,
+                )
+                render_pyvis_graph(
+                    g_full=g_imp,
+                    g_viz=viz_imp,
+                    label_key="subsystem_label",
+                    show_edge_labels=show_edge_labels,
+                    html_path=os.path.join(BASE_DIR, "improved_graph.html"),
+                    cmap=color_map_subsystem(),
+                )
     else:
-        # Only subsystem label view
-        for n in base_g.nodes():
-            t = safe_label(base_g.nodes[n].get("subsystem_label", "UNKNOWN"))
-            if t not in show_types:
-                t = "UNKNOWN"
-            if show_types.get(t, False):
-                viz.add_node(n, entity_type=t)
-
-    for u, v, data in base_g.edges(data=True):
-        conf = float(data.get("confidence", data.get("weight", 0.30)))
-        if conf < min_conf:
-            continue
-        if u not in viz.nodes or v not in viz.nodes:
-            continue
-        viz.add_edge(u, v, **data)
-
-    # -----------------------------
-    # Render graph
-    # -----------------------------
-    if viz.number_of_nodes() > 0 and viz.number_of_edges() > 0:
-        net = Network(height="600px", width="100%", bgcolor="#111111", font_color="white", directed=True)
-
-        cmap = color_map_for_mode(graph_mode)
-        degrees = dict(viz.degree())
-
-        for node, attrs in viz.nodes(data=True):
-            t = attrs.get("entity_type", "UNKNOWN")
-            node_conf = float(base_g.nodes[node].get("confidence", 0.0)) if node in base_g.nodes else 0.0
-
-            node_label = f"{node}\n[{t}]"
-
-            net.add_node(
-                node,
-                label=node_label,
-                size=12 + degrees.get(node, 0) * 5,
-                color=cmap.get(t, "#B0B0B0"),
-                title=f"type: {t}<br>confidence: {node_conf:.2f}",
-            )
-
-        for u, v, data in viz.edges(data=True):
-            raw_label = str(data.get("label") or data.get("predicate") or "related")
-            conf = float(data.get("confidence", data.get("weight", 0.30)))
-            width = 1 + min(6, conf * 6)
-
-            net.add_edge(
-                u,
-                v,
-                label=raw_label if show_edge_labels else "",
-                width=width,
-                arrows="to",
-                title=f"{raw_label} (conf {conf:.2f})",
-            )
-
-        net.set_options(f"""
-        {{
-          "physics": {{
-            "enabled": true,
-            "solver": "forceAtlas2Based",
-            "forceAtlas2Based": {{
-              "gravitationalConstant": -90,
-              "centralGravity": 0.03,
-              "springLength": 160,
-              "springConstant": 0.06,
-              "avoidOverlap": 1
-            }},
-            "stabilization": {{ "enabled": true, "iterations": 1000 }}
-          }},
-          "edges": {{
-            "smooth": {{ "enabled": true, "type": "dynamic" }},
-            "font": {{ "size": {14 if show_edge_labels else 0}, "align": "middle" }}
-          }},
-          "nodes": {{
-            "shape": "dot",
-            "font": {{ "size": 18 }}
-          }}
-        }}
-        """)
-
-        # Avoid collisions by using a per-run file name
-        output_file = os.path.join(BASE_DIR, "graph_output.html")
-        net.save_graph(output_file)
-        with open(output_file, "r", encoding="utf-8") as f:
-            components.html(f.read(), height=650)
-
-    else:
-        if base_g.number_of_nodes() == 0:
-            st.info("Graph is empty. Paste text and click Build Graph.")
+        g_imp = st.session_state.improved_graph
+        if g_imp.number_of_nodes() == 0:
+            st.info("Graph is empty. Paste text or upload a PDF and click Build.")
         else:
-            st.info("Graph built but filtered out. Lower min confidence or enable more types.")
-            with st.expander("Debug info"):
-                st.write("Stored nodes:", base_g.number_of_nodes())
-                st.write("Stored edges:", base_g.number_of_edges())
-                st.write("Shown nodes:", viz.number_of_nodes())
-                st.write("Shown edges:", viz.number_of_edges())
+            viz_imp = filter_graph(
+                g_imp,
+                label_key="subsystem_label",
+                show_types=show_types_sub,
+                min_conf=min_conf,
+            )
+            render_pyvis_graph(
+                g_full=g_imp,
+                g_viz=viz_imp,
+                label_key="subsystem_label",
+                show_edge_labels=show_edge_labels,
+                html_path=out_html,
+                cmap=color_map_subsystem(),
+            )
 
 # -----------------------------
-# Analytics / exports column
+# Analytics / exports
 # -----------------------------
 with col_side:
     st.subheader("Text Analytics")
-    if st.session_state.last_input_text.strip():
+    if (st.session_state.last_input_text or "").strip():
         ta = TextAnalytics(st.session_state.last_input_text)
         s = ta.summary()
         st.metric("Characters", s["characters"])
@@ -390,27 +551,96 @@ with col_side:
         st.metric("Tokens", s["tokens"])
         st.metric("Avg sentence length (words)", s["avg_sentence_length_words"])
     else:
-        st.write("Paste text and build a graph.")
+        st.write("Paste text or upload a PDF and build graphs.")
 
     st.divider()
 
     st.subheader("Graph Analytics")
-    analytics = GraphAnalytics(base_g)
-    st.metric("Nodes", analytics.node_count())
-    st.metric("Edges", analytics.edge_count())
-    st.metric("Density", round(analytics.density(), 4))
-    cc = nx.number_weakly_connected_components(base_g) if base_g.number_of_nodes() else 0
-    st.metric("Connected Components", cc)
+
+    def show_graph_metrics(title: str, g: nx.DiGraph, label_key: str):
+        st.markdown(f"**{title}**")
+        analytics = GraphAnalytics(g)
+        st.metric("Nodes", analytics.node_count())
+        st.metric("Edges", analytics.edge_count())
+        st.metric("Density", round(analytics.density(), 4))
+        cc = nx.number_weakly_connected_components(g) if g.number_of_nodes() else 0
+        st.metric("Connected Components", cc)
+
+        if compute_metrics is not None:
+            m = compute_metrics(g, label_key=label_key)
+            st.metric("UNKNOWN rate", round(m.unknown_rate, 3))
+            st.metric("OTHER rate", round(m.other_rate, 3))
+            st.metric("Avg node confidence", round(m.avg_node_confidence, 3))
+            st.metric("Meaningful edge rate", round(m.meaningful_edge_rate, 3))
+
+    if compare_mode:
+        gb = st.session_state.baseline_graph
+        gi = st.session_state.improved_graph
+
+        if gb.number_of_nodes():
+            show_graph_metrics("Baseline (Web Graph)", gb, label_key="entity_type")
+        else:
+            st.info("Baseline graph not built yet.")
+
+        st.divider()
+
+        if gi.number_of_nodes():
+            show_graph_metrics("Improved (Subsystem KG)", gi, label_key="subsystem_label")
+        else:
+            st.info("Improved graph not built yet.")
+
+        # Quick deltas (if both exist)
+        if compute_metrics is not None and gb.number_of_nodes() and gi.number_of_nodes():
+            mb = compute_metrics(gb, label_key="entity_type")
+            mi = compute_metrics(gi, label_key="subsystem_label")
+            st.divider()
+            st.subheader("Comparison Deltas")
+            st.write("UNKNOWN rate drop:", round(mb.unknown_rate - mi.unknown_rate, 3))
+            st.write("Meaningful edge rate increase:", round(mi.meaningful_edge_rate - mb.meaningful_edge_rate, 3))
+    else:
+        gi = st.session_state.improved_graph
+        if gi.number_of_nodes():
+            show_graph_metrics("Improved (Subsystem KG)", gi, label_key="subsystem_label")
+        else:
+            st.info("Graph not built yet.")
 
     st.divider()
-
     st.subheader("Exports")
-    json_bytes = graph_to_json_bytes(base_g)
-    csv_bytes = graph_to_csv_bytes(base_g)
-    top_entities = analytics.top_entities(10) if hasattr(analytics, "top_entities") else []
-    pdf_bytes = graph_to_pdf_bytes(base_g, title="Knowledge Graph Report", top_entities=top_entities)
 
-    st.download_button("Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
-    st.download_button("Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
-    st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
+    # Choose which graph to export by default
+    export_graph = st.session_state.improved_graph if st.session_state.improved_graph.number_of_nodes() else st.session_state.baseline_graph
 
+    if export_graph.number_of_nodes() == 0:
+        st.info("Build a graph to enable exports.")
+    else:
+        json_bytes = graph_to_json_bytes(export_graph)
+        csv_bytes = graph_to_csv_bytes(export_graph)
+
+        analytics = GraphAnalytics(export_graph)
+        top_entities = analytics.top_entities(10) if hasattr(analytics, "top_entities") else []
+        pdf_bytes = graph_to_pdf_bytes(export_graph, title="Knowledge Graph Report", top_entities=top_entities)
+
+        st.download_button("Download Graph JSON", data=json_bytes, file_name="graph.json", mime="application/json")
+        st.download_button("Download Edges CSV", data=csv_bytes, file_name="edges.csv", mime="text/csv")
+        st.download_button("Download Report PDF", data=pdf_bytes, file_name="report.pdf", mime="application/pdf")
+
+        if compute_metrics is not None and metrics_to_dict is not None:
+            # infer label key
+            label_key = "subsystem_label" if "subsystem_label" in next(iter(export_graph.nodes(data=True)))[1] else "entity_type"
+            m = compute_metrics(export_graph, label_key=label_key)
+            metrics_json = json.dumps(metrics_to_dict(m), indent=2).encode("utf-8")
+            st.download_button("Download Metrics JSON", data=metrics_json, file_name="metrics.json", mime="application/json")
+
+        if compare_mode and st.session_state.baseline_graph.number_of_nodes() and st.session_state.improved_graph.number_of_nodes():
+            st.divider()
+            st.caption("Comparison exports (both graphs):")
+
+            jb = graph_to_json_bytes(st.session_state.baseline_graph)
+            cb = graph_to_csv_bytes(st.session_state.baseline_graph)
+            st.download_button("Download Baseline JSON", data=jb, file_name="baseline_graph.json", mime="application/json")
+            st.download_button("Download Baseline CSV", data=cb, file_name="baseline_edges.csv", mime="text/csv")
+
+            ji = graph_to_json_bytes(st.session_state.improved_graph)
+            ci = graph_to_csv_bytes(st.session_state.improved_graph)
+            st.download_button("Download Improved JSON", data=ji, file_name="improved_graph.json", mime="application/json")
+            st.download_button("Download Improved CSV", data=ci, file_name="improved_edges.csv", mime="text/csv")
