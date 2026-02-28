@@ -4,14 +4,127 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 import os
+import re
 import csv
 import json
-import re
 
 import networkx as nx
 import spacy
 
-from modules.ontology import Ontology  # uses the upgraded Ontology we created
+
+# -----------------------------
+# Optional external ontology (safe fallback)
+# -----------------------------
+try:
+    from modules.ontology import Ontology as ExternalOntology  # your existing ontology.py
+except Exception:  # pragma: no cover
+    ExternalOntology = None
+
+
+@dataclass
+class OntologyMapResult:
+    ontology_class: str
+    parent_class: str
+    confidence: float
+    method: str  # "subsystem" | "ner" | "value" | "fallback"
+
+
+class SubsystemOntology:
+    """
+    Lightweight subsystem ontology + edge validation.
+
+    This is intentionally independent from OPM/OPL.
+    It helps you:
+      - map nodes to ontology classes (TelecomComponent, PowerComponent, etc.)
+      - validate/normalize relation predicates
+    """
+
+    def __init__(self):
+        # ontology classes (subsystems + generic types)
+        self.classes = {
+            "TelecomComponent",
+            "PowerComponent",
+            "DataHandlingComponent",
+            "ThermalControlComponent",
+            "PropulsionComponent",
+            "AOCSComponent",
+            "PayloadComponent",
+            "GroundSegmentAsset",
+            "OrbitParameter",
+            "ScienceTerm",
+            "Organization",
+            "Location",
+            "Person",
+            "Value",
+            "Concept",
+            "Unknown",
+        }
+
+        # Allowed relation schema (domain, predicate, range)
+        # Keep it permissive to avoid deleting too much signal.
+        self.relations = {
+            ("TelecomComponent", "has_component", "TelecomComponent"),
+            ("PowerComponent", "has_component", "PowerComponent"),
+            ("DataHandlingComponent", "has_component", "DataHandlingComponent"),
+            ("ThermalControlComponent", "has_component", "ThermalControlComponent"),
+            ("PropulsionComponent", "has_component", "PropulsionComponent"),
+            ("AOCSComponent", "has_component", "AOCSComponent"),
+            ("PayloadComponent", "has_component", "PayloadComponent"),
+            ("GroundSegmentAsset", "has_component", "GroundSegmentAsset"),
+
+            ("PayloadComponent", "measures", "ScienceTerm"),
+            ("PayloadComponent", "measures", "Value"),
+            ("TelecomComponent", "has_limit_max", "Value"),
+            ("TelecomComponent", "has_limit_min", "Value"),
+            ("TelecomComponent", "has_range", "Value"),
+
+            ("OrbitParameter", "has_range", "Value"),
+            ("OrbitParameter", "has_limit_max", "Value"),
+            ("OrbitParameter", "has_limit_min", "Value"),
+
+            ("Concept", "related_to", "Concept"),
+            ("Concept", "co-occurs", "Concept"),
+        }
+
+    def map_node(self, node_text: str, subsystem_label: str, node_kind: str = "CONCEPT") -> OntologyMapResult:
+        sub = (subsystem_label or "UNKNOWN").upper().strip()
+        nk = (node_kind or "CONCEPT").upper().strip()
+
+        if nk in {"ORG"}:
+            return OntologyMapResult("Organization", "Concept", 0.85, "ner")
+        if nk in {"LOC"}:
+            return OntologyMapResult("Location", "Concept", 0.85, "ner")
+        if nk in {"PERSON"}:
+            return OntologyMapResult("Person", "Concept", 0.80, "ner")
+        if nk in {"VALUE"}:
+            return OntologyMapResult("Value", "Concept", 0.80, "value")
+        if nk in {"SCI_TERM"}:
+            return OntologyMapResult("ScienceTerm", "Concept", 0.75, "subsystem")
+
+        m = {
+            "TELECOM": "TelecomComponent",
+            "POWER": "PowerComponent",
+            "DATA": "DataHandlingComponent",
+            "THERMAL": "ThermalControlComponent",
+            "PROPULSION": "PropulsionComponent",
+            "AOCS": "AOCSComponent",
+            "PAYLOAD": "PayloadComponent",
+            "GROUND": "GroundSegmentAsset",
+            "ORBIT": "OrbitParameter",
+        }.get(sub, None)
+
+        if m:
+            return OntologyMapResult(m, "Concept", 0.78, "subsystem")
+
+        if sub in {"OTHER"}:
+            return OntologyMapResult("Concept", "Concept", 0.55, "fallback")
+        return OntologyMapResult("Unknown", "Concept", 0.35, "fallback")
+
+    def is_valid(self, subj_class: str, predicate: str, obj_class: str) -> bool:
+        # allow co-occurrence always
+        if predicate == "co-occurs":
+            return True
+        return (subj_class, predicate, obj_class) in self.relations
 
 
 # -----------------------------
@@ -24,8 +137,8 @@ class LabeledSpan:
     start: int
     end: int
     confidence: float = 0.60
-    node_kind: str = "CONCEPT"
-    source: str = "heuristic"  # "ner" | "lexicon" | "pattern" | "heuristic" | "acronym" | "science_vocab"
+    node_kind: str = "CONCEPT"  # SUBSYSTEM_TERM | SCI_TERM | VALUE | ORG | LOC | PERSON | CONCEPT
+    source: str = "heuristic"   # acronym | science_vocab | lexicon | ner | pattern | heuristic
 
 
 class LabelledSubsystemKGBuilder:
@@ -35,17 +148,17 @@ class LabelledSubsystemKGBuilder:
     Outputs ONE label per node:
       - subsystem_label: TELECOM/POWER/DATA/PAYLOAD/ORBIT/GROUND/PROPULSION/THERMAL/AOCS/OTHER/UNKNOWN
 
-    Adds ontology mapping per node:
-      - ontology_class, ontology_parent, ontology_conf, ontology_method
-
-    Uses:
-      - ESA subsystem lexicon (expanded)
-      - ESA acronym map (from data/vocab/esa_acronym_map.json)
-      - ESA science terms list (from data/vocab/esa_science_terms.csv)
+    Features:
+      - Loads curated ESA vocab:
+          data/vocab/esa_acronym_map.json
+          data/vocab/esa_science_terms.csv
+      - Acronym override (high precision)
+      - Science terms boost (higher recall)
       - noun chunks + TitleCase phrases + regex anchors
-      - relation extraction (limits/ranges + have/use/provide/include)
+      - relation extraction (limits/ranges + have/use/provide/include/measure)
       - HUB-based co-occurrence (no sentence cliques)
-      - ontology edge validation (optional, conservative)
+      - stable canonical node ids
+      - ontology mapping per node + conservative edge validation (optional)
     """
 
     def __init__(
@@ -55,37 +168,42 @@ class LabelledSubsystemKGBuilder:
         vocab_dir: Optional[str] = None,
         enable_ontology_validation: bool = True,
     ):
-        # Keep parser + ner; disable lemmatizer for speed.
+        # Keep parser + ner; disable lemmatizer for speed
         self.nlp = spacy.load(spacy_model, disable=["lemmatizer"])
         if "sentencizer" not in self.nlp.pipe_names:
             self.nlp.add_pipe("sentencizer", first=True)
 
         self.enable_noun_chunks = enable_noun_chunks
         self.enable_ontology_validation = enable_ontology_validation
-
         self._raw_text: str = ""
-        self.ontology = Ontology()
+
+        # internal subsystem ontology (safe, always available)
+        self.sub_ontology = SubsystemOntology()
+
+        # If your modules/ontology.py exists but is unrelated (PERSON/ORG/LOC/PRODUCT),
+        # we do NOT depend on it for mapping/validation. We only use it if it exposes
+        # an is_valid method and you later align it to subsystems.
+        self.external_ontology = ExternalOntology() if ExternalOntology else None
 
         # -------------------------
-        # ESA-tuned subsystem lexicon (baseline)
-        # (will be further expanded by loaded science_terms if you want)
+        # Baseline ESA-tuned subsystem lexicon (expanded)
         # -------------------------
         self.subsystem_lexicon: Dict[str, List[str]] = {
             "TELECOM": [
-                "telemetry", "telecommand", "ttc", "tt&c", "tt & c",
-                "rf", "ranging", "doppler",
+                "telemetry", "telecommand", "ttc", "tt&c", "tt & c", "tm", "tc",
+                "rf", "ranging", "doppler", "ccsds",
                 "transmitter", "receiver", "transceiver", "transponder", "modem",
                 "antenna", "lna", "pa", "amplifier", "filter", "diplexer", "duplexer",
                 "downlink", "uplink", "link budget", "eirp", "g/t",
                 "x-band", "x band", "ka-band", "ka band", "s-band", "s band",
-                "bit rate", "data rate", "bandwidth", "frequency", "modulation", "coding", "fec",
-                "bpsk", "qpsk", "qam", "ccsds",
+                "bit rate", "data rate", "bandwidth", "frequency", "carrier",
+                "modulation", "coding", "fec", "bpsk", "qpsk", "qam",
             ],
             "DATA": [
                 "cdhs", "c&dh", "command and data handling", "data handling", "obdh",
                 "on-board computer", "onboard computer", "obc", "avionics",
                 "mass memory", "ssmm", "solid state mass memory", "memory", "storage",
-                "packet", "packets", "compression", "data volume",
+                "packet", "packets", "telemetry packet", "compression", "data volume",
                 "spacewire", "spw", "can bus",
                 "mil-std-1553b", "mil-1553", "1553b",
                 "remote interface unit", "riu", "rtu",
@@ -95,7 +213,8 @@ class LabelledSubsystemKGBuilder:
             ],
             "POWER": [
                 "eps", "electrical power subsystem", "electrical power",
-                "solar array", "solar arrays", "solar panel", "solar panels", "solar cell", "solar cells",
+                "solar array", "solar arrays", "solar panel", "solar panels",
+                "solar cell", "solar cells",
                 "battery", "batteries", "battery assembly",
                 "pcdu", "pdu", "power distribution", "power conditioning",
                 "converter", "dc-dc", "dcdc", "regulator", "mppt",
@@ -109,10 +228,11 @@ class LabelledSubsystemKGBuilder:
                 "radiator", "radiators", "radiator panel", "radiator panels",
                 "heater", "heaters", "heater line", "heater lines", "htr",
                 "mli", "multi-layer insulation", "insulation",
-                "heat pipe", "heat pipes", "loop heat pipe", "lhp", "thermal strap", "thermal doubler",
+                "heat pipe", "heat pipes", "loop heat pipe", "lhp",
+                "thermal strap", "thermal doubler",
                 "thermistor", "thermostat", "temperature sensor",
                 "high emissivity", "coating", "louver", "osr",
-                "temperature stability", "thermal dissipation",
+                "temperature", "thermal stability", "thermal dissipation",
             ],
             "AOCS": [
                 "aocs", "adcs", "gnc",
@@ -161,14 +281,23 @@ class LabelledSubsystemKGBuilder:
             ],
         }
 
-        # Tie-break helpers (ESA overlaps)
-        self.ground_strong_cues = ["pdgs", "focc", "fos", "estrack", "kiruna", "svalbard", "mission planning", "ground segment", "mcs", "mps", "fds"]
-        self.data_strong_cues = ["cdhs", "obc", "mass memory", "ssmm", "spacewire", "1553", "mil-std-1553", "pdht", "compression", "processing chain", "level-1", "level-2", "fdir"]
-        self.telecom_strong_cues = ["tt&c", "ranging", "x-band", "s-band", "ka-band", "antenna", "rf", "transceiver", "transponder", "downlink", "uplink"]
+        # Tie-break helpers for ESA overlaps
+        self.ground_strong_cues = [
+            "pdgs", "focc", "fos", "estrack", "kiruna", "svalbard",
+            "mission planning", "ground segment", "mcs", "mps", "fds",
+        ]
+        self.data_strong_cues = [
+            "cdhs", "obc", "mass memory", "ssmm", "spacewire", "1553",
+            "mil-std-1553", "pdht", "compression", "processing chain",
+            "level-1", "level-2", "fdir",
+        ]
+        self.telecom_strong_cues = [
+            "tt&c", "ranging", "x-band", "s-band", "ka-band",
+            "antenna", "rf", "transceiver", "transponder",
+            "downlink", "uplink",
+        ]
 
-        # -------------------------
         # Junk filtering
-        # -------------------------
         self.stop_phrases = {
             "the mission", "the spacecraft", "the satellite", "the instrument",
             "the payload", "the system", "this mission", "this instrument",
@@ -179,7 +308,7 @@ class LabelledSubsystemKGBuilder:
         }
         self.determiner_prefix = ("the ", "a ", "an ", "this ", "that ", "these ", "those ")
 
-        # Regex patterns that are useful anchors (kept as nodes)
+        # Regex anchors (kept as nodes)
         self.token_patterns = [
             r"\b(?:sun-?synchronous|low earth orbit|leo|near-?polar)\b",
             r"\b\d{2,4}\s?km\b",
@@ -188,12 +317,10 @@ class LabelledSubsystemKGBuilder:
         ]
 
         # -------------------------
-        # Load curated vocab files (recommended to commit in repo)
+        # Load curated vocab files
         # -------------------------
-        # default vocab_dir = <project_root>/data/vocab
         if vocab_dir is None:
-            # this file is modules/extractors/..., so go up 3 levels to project root
-            here = os.path.dirname(os.path.abspath(__file__))
+            here = os.path.dirname(os.path.abspath(__file__))       # .../modules/extractors
             project_root = os.path.abspath(os.path.join(here, "..", ".."))
             vocab_dir = os.path.join(project_root, "data", "vocab")
 
@@ -202,23 +329,20 @@ class LabelledSubsystemKGBuilder:
         self.acronym_expansions: Dict[str, str] = {}
         self.science_terms: Dict[str, Tuple[str, float]] = {}  # term_low -> (subsystem, conf)
 
-        self._load_vocab_files(vocab_dir)
+        self._load_vocab_files(self.vocab_dir)
 
-        # Merge acronym subsystem mapping into fast override map
-        # (keep Ontology acronym_map too; this is for classifier)
-        # Map keys may contain punctuation; keep raw and also space-stripped variants
+        # Acronym override map
         self._acronym_override: Dict[str, str] = {}
         for acr, sub in self.acronym_to_subsystem.items():
             self._acronym_override[acr.upper()] = sub
             self._acronym_override[acr.upper().replace(" ", "")] = sub
 
-        # Optionally expand lexicon with science_terms (helps recall)
-        # (only add if term length >= 4 and not too generic)
+        # Optionally expand subsystem lexicon with science terms (helps recall)
         for term_low, (sub, _) in self.science_terms.items():
             if sub in self.subsystem_lexicon and len(term_low) >= 4 and term_low not in {"mission", "spacecraft", "system"}:
                 self.subsystem_lexicon[sub].append(term_low)
 
-        # Precompile lexicon patterns (fast boundary-ish matching)
+        # Precompile lexicon patterns
         self._compiled: Dict[str, List[re.Pattern]] = {
             label: [self._compile_term(t) for t in sorted(set(terms), key=lambda x: (-len(x), x))]
             for label, terms in self.subsystem_lexicon.items()
@@ -260,14 +384,13 @@ class LabelledSubsystemKGBuilder:
                 end=int(s.end),
             )
 
-        # Ontology mapping for nodes (after node creation)
+        # Ontology mapping per node
         for n, attrs in g.nodes(data=True):
-            sub = attrs.get("subsystem_label", "UNKNOWN")
-            m = self.ontology.map_to_ontology(n, sub)
-            attrs["ontology_class"] = m.ontology_class
-            attrs["ontology_parent"] = m.parent_class
-            attrs["ontology_conf"] = float(m.confidence)
-            attrs["ontology_method"] = m.method
+            res = self.sub_ontology.map_node(n, attrs.get("subsystem_label", "UNKNOWN"), attrs.get("node_kind", "CONCEPT"))
+            attrs["ontology_class"] = res.ontology_class
+            attrs["ontology_parent"] = res.parent_class
+            attrs["ontology_conf"] = float(res.confidence)
+            attrs["ontology_method"] = res.method
 
         # Edges
         for sent in doc.sents:
@@ -284,7 +407,7 @@ class LabelledSubsystemKGBuilder:
 
             in_sent = list(dict.fromkeys(in_sent))
 
-            # 1) Relation extraction (adds meaningful edges)
+            # 1) Relation extraction
             rel_triples = self.extract_relations(sent, in_sent)
             for u, pred, v, conf in rel_triples:
                 u2 = self.canon(u)
@@ -293,7 +416,6 @@ class LabelledSubsystemKGBuilder:
                     continue
 
                 if v2 not in g:
-                    # values become nodes
                     g.add_node(
                         v2,
                         subsystem_label="OTHER",
@@ -303,16 +425,15 @@ class LabelledSubsystemKGBuilder:
                         start=-1,
                         end=-1,
                     )
-                    # ontology map new node
-                    m = self.ontology.map_to_ontology(v2, g.nodes[v2].get("subsystem_label", "UNKNOWN"))
-                    g.nodes[v2]["ontology_class"] = m.ontology_class
-                    g.nodes[v2]["ontology_parent"] = m.parent_class
-                    g.nodes[v2]["ontology_conf"] = float(m.confidence)
-                    g.nodes[v2]["ontology_method"] = m.method
+                    res = self.sub_ontology.map_node(v2, g.nodes[v2].get("subsystem_label", "UNKNOWN"), g.nodes[v2].get("node_kind", "CONCEPT"))
+                    g.nodes[v2]["ontology_class"] = res.ontology_class
+                    g.nodes[v2]["ontology_parent"] = res.parent_class
+                    g.nodes[v2]["ontology_conf"] = float(res.confidence)
+                    g.nodes[v2]["ontology_method"] = res.method
 
                 self._add_edge(g, u2, v2, pred, conf)
 
-            # 2) Co-occurrence edges (HUB-based, no cliques)
+            # 2) HUB-based co-occurrence
             if len(in_sent) >= 2:
                 hub = max(in_sent, key=lambda n: in_sent_conf.get(n, 0.0))
                 for n in in_sent:
@@ -320,9 +441,9 @@ class LabelledSubsystemKGBuilder:
                         continue
                     self._add_edge(g, hub, n, "co-occurs", 0.35)
 
-        # Optional ontology validation pass (conservative)
+        # Conservative ontology validation pass
         if self.enable_ontology_validation:
-            self._validate_edges_with_ontology(g)
+            self._validate_edges(g)
 
         # remove isolated nodes
         isolates = [n for n in list(g.nodes()) if g.degree(n) == 0]
@@ -337,18 +458,19 @@ class LabelledSubsystemKGBuilder:
         spans: List[LabeledSpan] = []
         ner_spans = [(e.start_char, e.end_char, e.label_, e.text) for e in doc.ents]
 
+        raw_low = raw_text.lower()
+
         # 0) Acronym tokens (high precision)
-        # Capture ALLCAPS+digits tokens like PCDU, SSMM, MIL-STD-1553B, TT&C
         for m in re.finditer(r"\b[A-Z][A-Z0-9&/\-]{1,20}\b", raw_text):
             txt = raw_text[m.start():m.end()]
             c = self.canon_display(txt)
             if not c:
                 continue
-            lab = self._acronym_override.get(c.upper(), None) or self._acronym_override.get(c.upper().replace(" ", ""), None)
+            lab = self._acronym_override.get(c.upper()) or self._acronym_override.get(c.upper().replace(" ", ""))
             if lab:
                 spans.append(LabeledSpan(text=c, subsystem=lab, start=m.start(), end=m.end(), confidence=0.92, node_kind="SUBSYSTEM_TERM", source="acronym"))
 
-        # 1) TitleCase phrases (mission/instrument names, headings, etc.)
+        # 1) TitleCase phrases
         for m in re.finditer(r"\b(?:[A-Z][a-zA-Z0-9\-]+(?:\s+[A-Z][a-zA-Z0-9\-]+){0,4})\b", raw_text):
             txt = raw_text[m.start():m.end()]
             c = self.canon_display(txt)
@@ -403,31 +525,26 @@ class LabelledSubsystemKGBuilder:
                     continue
                 spans.append(LabeledSpan(text=c, subsystem=subsystem, start=m.start(), end=m.end(), confidence=conf, node_kind=kind, source=source))
 
-        # 4) science terms (from curated CSV) — high recall, controlled confidence
-        # We keep these even if noun_chunks miss them due to line breaks.
-        if self.science_terms:
-            raw_low = raw_text.lower()
-            for term_low, (sub, conf0) in self.science_terms.items():
-                if len(term_low) < 4:
-                    continue
-                # boundary-ish match
-                if re.search(rf"(?<!\w){re.escape(term_low)}(?!\w)", raw_low):
-                    # find first occurrence for span offsets (best effort)
-                    idx = raw_low.find(term_low)
-                    if idx >= 0:
-                        spans.append(
-                            LabeledSpan(
-                                text=raw_text[idx:idx + len(term_low)],
-                                subsystem=sub,
-                                start=idx,
-                                end=idx + len(term_low),
-                                confidence=min(0.88, max(0.60, conf0)),
-                                node_kind="SCI_TERM",
-                                source="science_vocab",
-                            )
+        # 4) science terms (CSV) — helps with ESA weird line breaks
+        for term_low, (sub, conf0) in self.science_terms.items():
+            if len(term_low) < 4:
+                continue
+            if re.search(rf"(?<!\w){re.escape(term_low)}(?!\w)", raw_low):
+                idx = raw_low.find(term_low)
+                if idx >= 0:
+                    spans.append(
+                        LabeledSpan(
+                            text=raw_text[idx:idx + len(term_low)],
+                            subsystem=sub,
+                            start=idx,
+                            end=idx + len(term_low),
+                            confidence=min(0.88, max(0.60, float(conf0))),
+                            node_kind="SCI_TERM",
+                            source="science_vocab",
                         )
+                    )
 
-        # dedup by canonical id; keep max confidence
+        # Dedup by canonical id (keep max confidence)
         best: Dict[str, LabeledSpan] = {}
         for s in spans:
             key = self.canon(s.text)
@@ -439,35 +556,35 @@ class LabelledSubsystemKGBuilder:
         return list(best.values())
 
     # -----------------------------
-    # Classification core (subsystem only)
+    # Classification (subsystem only)
     # -----------------------------
     def classify_span(self, span_text: str, start: int, end: int, ner_spans) -> Tuple[str, float, str, str]:
         low = span_text.lower().strip()
 
-        # 0) Acronym override (highest precision)
+        # Acronym override
         up = span_text.strip().upper()
         sub = self._acronym_override.get(up) or self._acronym_override.get(up.replace(" ", ""))
         if sub:
             return sub, 0.92, "SUBSYSTEM_TERM", "acronym"
 
-        # 1) NER override for ORG/LOC/PERSON: keep them as OTHER so they don't pollute subsystem graph
+        # NER override: ORG/LOC/PERSON -> OTHER (to avoid polluting subsystem labels)
         ner = self._ner_override(start, end, ner_spans)
         if ner in {"ORG", "LOC", "PERSON"}:
             return "OTHER", 0.70, ner, "ner"
 
-        # 2) Science vocab direct hit (strong-ish)
+        # Direct science-term hit
         if low in self.science_terms:
-            sub2, c0 = self.science_terms[low]
-            return sub2, float(min(0.88, max(0.60, c0))), "SCI_TERM", "science_vocab"
+            s2, c0 = self.science_terms[low]
+            return s2, float(min(0.88, max(0.60, c0))), "SCI_TERM", "science_vocab"
 
-        # 3) Score lexicon on span itself
+        # Lexicon scoring
         best_lab, best_hits = self._best_label(low)
 
-        # 4) Sentence-aware tie-break (use window around the span)
+        # Context tie-break
         window = self._context_window(start, end, self._raw_text, win=160)
         best_lab = self._tie_break(best_lab, window, span_text)
 
-        # 5) Confidence
+        # Confidence
         if best_hits >= 4:
             conf = 0.90
         elif best_hits >= 2:
@@ -475,12 +592,14 @@ class LabelledSubsystemKGBuilder:
         elif best_hits >= 1:
             conf = 0.62
         else:
-            # allow orbit/value anchors to survive
+            # keep orbit/value anchors
             if self._looks_like_value(low) or re.search(r"\b\d{2,4}\s?km\b", low):
-                return "ORBIT", 0.60, "PARAMETER", "pattern"
+                return "ORBIT", 0.60, "VALUE", "pattern"
             return "UNKNOWN", 0.30, "CONCEPT", "heuristic"
 
-        kind = "SUBSYSTEM_TERM" if best_lab in {"TELECOM", "POWER", "DATA", "PROPULSION", "THERMAL", "AOCS", "GROUND", "ORBIT", "PAYLOAD"} else "CONCEPT"
+        kind = "SUBSYSTEM_TERM" if best_lab in {
+            "TELECOM", "POWER", "DATA", "PROPULSION", "THERMAL", "AOCS", "GROUND", "ORBIT", "PAYLOAD"
+        } else "CONCEPT"
         return best_lab, conf, kind, "lexicon"
 
     # -----------------------------
@@ -494,7 +613,7 @@ class LabelledSubsystemKGBuilder:
         if not span_nodes:
             return rels
 
-        # Range: between A and B
+        # Range: between A and B (+ optional unit)
         m = re.search(r"\bbetween\s+(\d+(?:\.\d+)?)\s*([a-zA-Z%°/]+)?\s+and\s+(\d+(?:\.\d+)?)\s*([a-zA-Z%°/]+)?\b", low)
         if m:
             unit = (m.group(2) or m.group(4) or "")
@@ -515,7 +634,7 @@ class LabelledSubsystemKGBuilder:
                 val = f"{mv.group(1)}{mv.group(2) or ''}"
                 rels.append((span_nodes[0], "has_limit_min", val, 0.80))
 
-        # Verb relations (cheap)
+        # Verb relations (cheap, but adds meaning)
         for token in sent:
             if token.lemma_ in {"have", "use", "provide", "measure", "include"}:
                 subj = [w for w in token.lefts if w.dep_ in {"nsubj", "nsubjpass"}]
@@ -565,7 +684,7 @@ class LabelledSubsystemKGBuilder:
             if any(c in s for c in self.ground_strong_cues) or any(c in n for c in self.ground_strong_cues):
                 return "GROUND"
 
-        # DATA vs TELECOM overlap in ESA docs
+        # DATA vs TELECOM overlap
         if label in {"TELECOM", "DATA"}:
             has_data = any(c in s for c in self.data_strong_cues) or any(c in n for c in self.data_strong_cues)
             has_tel = any(c in s for c in self.telecom_strong_cues) or any(c in n for c in self.telecom_strong_cues)
@@ -614,10 +733,13 @@ class LabelledSubsystemKGBuilder:
         return None
 
     def _looks_like_value(self, txt: str) -> bool:
-        return bool(re.search(r"\b\d+(?:\.\d+)?\s*(?:km|m|s|ms|w|mw|kw|hz|khz|mhz|ghz|v|mv|a|ma|db|dbi|kbps|mbps|gbps|kbit/s|mbit/s|gbit/s|°c|c|k|%)\b", txt.lower()))
+        return bool(re.search(
+            r"\b\d+(?:\.\d+)?\s*(?:km|m|s|ms|w|mw|kw|hz|khz|mhz|ghz|v|mv|a|ma|db|dbi|kbps|mbps|gbps|kbit/s|mbit/s|gbit/s|°c|c|k|%)\b",
+            txt.lower()
+        ))
 
     # -----------------------------
-    # Graph edge helper
+    # Edge helpers + ontology validation
     # -----------------------------
     def _add_edge(self, g: nx.Graph, u: str, v: str, pred: str, conf: float) -> None:
         if not u or not v or u == v:
@@ -631,23 +753,21 @@ class LabelledSubsystemKGBuilder:
         else:
             g.add_edge(u, v, predicate=pred, label=pred, weight=1, confidence=float(conf))
 
-    def _validate_edges_with_ontology(self, g: nx.Graph) -> None:
+    def _validate_edges(self, g: nx.Graph) -> None:
         """
-        Conservative validation:
-        - If an edge predicate is not valid under (subj_subsystem, predicate, obj_subsystem/VALUE),
-          downgrade confidence and/or turn into co-occurs (keeping connectivity but reducing noise).
+        Conservative:
+          - If a non-cooccurs edge violates ontology, convert to co-occurs and reduce confidence.
+          - Uses internal SubsystemOntology. (ExternalOntology is ignored unless you later upgrade it.)
         """
         for u, v, data in list(g.edges(data=True)):
             pred = str(data.get("predicate") or data.get("label") or "co-occurs")
-            su = g.nodes[u].get("subsystem_label", "UNKNOWN")
-            sv = g.nodes[v].get("subsystem_label", "UNKNOWN")
-            obj_type = "VALUE" if g.nodes[v].get("node_kind") == "VALUE" else sv
-
             if pred == "co-occurs":
                 continue
 
-            if not self.ontology.is_valid(su, pred, obj_type):
-                # degrade
+            su = g.nodes[u].get("ontology_class", "Concept")
+            sv = g.nodes[v].get("ontology_class", "Concept")
+
+            if not self.sub_ontology.is_valid(su, pred, sv):
                 data["confidence"] = float(min(0.25, float(data.get("confidence", 0.35))))
                 data["predicate"] = "co-occurs"
                 data["label"] = "co-occurs"
@@ -695,16 +815,15 @@ class LabelledSubsystemKGBuilder:
           - data/vocab/esa_acronym_map.json
           - data/vocab/esa_science_terms.csv
 
-        Expected acronym json structure:
+        Acronym JSON structure:
           { "TELECOM": { "TT&C": "expansion", ... }, "POWER": {...}, ... }
 
-        Expected science csv:
+        Science CSV:
           term,subsystem,confidence
         """
         if not vocab_dir or not os.path.isdir(vocab_dir):
             return
 
-        # Acronym JSON
         acr_path = os.path.join(vocab_dir, "esa_acronym_map.json")
         if os.path.exists(acr_path):
             try:
@@ -723,10 +842,8 @@ class LabelledSubsystemKGBuilder:
                             if expansion:
                                 self.acronym_expansions[a] = str(expansion).strip()
             except Exception:
-                # silent fail by design; app should still run without vocab
                 pass
 
-        # Science terms CSV
         sci_path = os.path.join(vocab_dir, "esa_science_terms.csv")
         if os.path.exists(sci_path):
             try:
