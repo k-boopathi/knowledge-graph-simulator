@@ -1,0 +1,70 @@
+{
+  "TELECOM": {
+    "TT&C": "Telemetry, Tracking and Command",
+    "TTC": "Telemetry, Tracking and Command",
+    "RF": "Radio Frequency",
+    "S-BAND": "S-band communication",
+    "X-BAND": "X-band communication",
+    "KA-BAND": "Ka-band communication",
+    "LNA": "Low Noise Amplifier",
+    "PA": "Power Amplifier",
+    "FEC": "Forward Error Correction",
+    "QPSK": "Quadrature Phase Shift Keying",
+    "BPSK": "Binary Phase Shift Keying",
+    "QAM": "Quadrature Amplitude Modulation",
+    "TM": "Telemetry",
+    "TC": "Telecommand"
+  },
+
+  "DATA": {
+    "CDHS": "Command and Data Handling Subsystem",
+    "CDH": "Command and Data Handling",
+    "OBDH": "On-Board Data Handling",
+    "OBC": "On-Board Computer",
+    "SSMM": "Solid-State Mass Memory",
+    "PDHT": "Payload Data Handling and Transmission",
+    "MIL-1553": "MIL-STD-1553 Data Bus",
+    "SPACEWIRE": "SpaceWire Data Interface",
+    "L1": "Level-1 Data Product",
+    "L1B": "Level-1B Data Product",
+    "L2": "Level-2 Data Product"
+  },
+
+  "POWER": {
+    "EPS": "Electrical Power Subsystem",
+    "PCDU": "Power Conditioning and Distribution Unit",
+    "PDU": "Power Distribution Unit",
+    "LCL": "Latching Current Limiter",
+    "MPPT": "Maximum Power Point Tracker",
+    "BCR": "Battery Charge Regulator"
+  },
+
+  "THERMAL": {
+    "TCS": "Thermal Control Subsystem",
+    "MLI": "Multi-Layer Insulation",
+    "OSR": "Optical Solar Reflector"
+  },
+
+  "AOCS": {
+    "AOCS": "Attitude and Orbit Control System",
+    "ADCS": "Attitude Determination and Control System",
+    "RW": "Reaction Wheel",
+    "RWA": "Reaction Wheel Assembly",
+    "ST": "Star Tracker",
+    "IMU": "Inertial Measurement Unit",
+    "GNSS": "Global Navigation Satellite System"
+  },
+
+  "PROPULSION": {
+    "MMH": "Monomethylhydrazine",
+    "NTO": "Nitrogen Tetroxide",
+    "PPU": "Power Processing Unit"
+  },
+
+  "GROUND": {
+    "PDGS": "Payload Data Ground Segment",
+    "FOS": "Flight Operations Segment",
+    "FOCC": "Flight Operations Control Centre",
+    "ESTRACK": "ESA Tracking Network"
+  }
+}
