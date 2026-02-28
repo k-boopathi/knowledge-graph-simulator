@@ -20,12 +20,6 @@ from modules.cooccurrence_builder import CooccurrenceGraphBuilder
 # -----------------------------
 # NEW: Labelled KG builder (missions / classes)
 # -----------------------------
-# Create this file:
-#   modules/extractors/labelled_subsystem_kg_builder.py
-# and ensure it defines:
-#   class LabelledSubsystemKGBuilder:
-#       def __init__(...): ...
-#       def build(self, text: str, min_conf: float = 0.0) -> nx.Graph
 try:
     from modules.extractors.labelled_subsystem_kg_builder import LabelledSubsystemKGBuilder
 except Exception:
@@ -35,98 +29,42 @@ except Exception:
 # -----------------------------
 # Helpers
 # -----------------------------
-def normalize_subsystem_label(x: str) -> str:
+def get_labelled_show_types(label_view: str) -> dict:
     """
-    Map model labels (or lexicon labels) to stable UI filter keys.
-
-    If you switch from subsystem labels to mission-domain labels,
-    update this mapping accordingly (or keep it as a passthrough).
+    Default filters depend on which label view we are displaying.
     """
-    s = (x or "").strip()
-    if not s or s.upper() == "O":
-        return "UNKNOWN"
-
-    low = s.lower()
-
-    # --- Subsystem-ish normalizations (keep if your builder outputs these) ---
-    if "tele" in low:
-        return "TELECOM"
-    if "prop" in low:
-        return "PROPULSION"
-    if "power" in low or "eps" in low:
-        return "POWER"
-    if "thermal" in low:
-        return "THERMAL"
-    if "aocs" in low or "adcs" in low or "attitude" in low:
-        return "AOCS"
-    if "payload" in low or "instrument" in low:
-        return "PAYLOAD"
-    if "ground" in low:
-        return "GROUND"
-    if "data" in low or "cdh" in low or "handling" in low:
-        return "DATA"
-    if "orbit" in low:
-        return "ORBIT"
-
-    # --- Mission-domain-ish examples (keep if your builder outputs these) ---
-    if "mission" in low:
-        return "MISSION"
-    if "objective" in low:
-        return "SCIENCE_OBJECTIVE"
-    if "measurement" in low or "observ" in low:
-        return "MEASUREMENT"
-    if "target" in low or "thermosphere" in low or "ionosphere" in low:
-        return "TARGET_REGION"
-    if "model" in low:
-        return "MODELING"
-    if "programme" in low or "program" in low:
-        return "PROGRAMME"
-    if "concept" in low:
-        return "CONCEPT"
-
-    if "other" in low:
-        return "OTHER"
-
-    # fallback: keep short raw label uppercased
-    if len(s) <= 32:
-        return s.upper()
-
-    return "UNKNOWN"
+    if label_view == "Subsystem":
+        return {
+            "TELECOM": True,
+            "POWER": True,
+            "DATA": True,
+            "PAYLOAD": True,
+            "ORBIT": True,
+            "GROUND": True,
+            "PROPULSION": True,
+            "THERMAL": True,
+            "AOCS": True,
+            "OTHER": True,
+            "UNKNOWN": True,
+        }
+    else:
+        return {
+            "MISSION": True,
+            "ORBIT": True,
+            "PAYLOAD": True,
+            "INSTRUMENT": True,
+            "GROUND": True,
+            "SUBSYSTEM": True,
+            "TARGET_REGION": True,
+            "PARAMETER": True,
+            "ORG": True,
+            "LOC": True,
+            "OTHER": True,
+            "UNKNOWN": True,
+        }
 
 
-def get_labelled_show_types() -> dict:
-    """
-    Default class filters for the labelled KG mode.
-    You can keep subsystem labels OR mission-domain labels (or both).
-    """
-    return {
-        # subsystem labels
-        "TELECOM": True,
-        "PROPULSION": True,
-        "POWER": True,
-        "THERMAL": True,
-        "AOCS": True,
-        "PAYLOAD": True,
-        "GROUND": True,
-        "DATA": True,
-        "ORBIT": True,
-
-        # mission-domain labels
-        "MISSION": True,
-        "PROGRAMME": True,
-        "TARGET_REGION": True,
-        "SCIENCE_OBJECTIVE": True,
-        "MEASUREMENT": True,
-        "MODELING": True,
-        "CONCEPT": True,
-
-        # misc
-        "OTHER": True,
-        "UNKNOWN": True,
-    }
-
-
-def color_map_for_mode(mode: str) -> dict:
+def color_map_for_mode(mode: str, label_view: str) -> dict:
     if mode == "Web Graph":
         return {
             "PERSON": "#4C78A8",
@@ -138,29 +76,46 @@ def color_map_for_mode(mode: str) -> dict:
             "UNKNOWN": "#B0B0B0",
         }
 
-    # labelled KG colors (covers both subsystem + mission-domain labels)
-    return {
-        "TELECOM": "#ff6b6b",
-        "PROPULSION": "#ffa94d",
-        "POWER": "#ffd43b",
-        "THERMAL": "#69db7c",
-        "AOCS": "#4dabf7",
-        "PAYLOAD": "#9775fa",
-        "GROUND": "#20c997",
-        "DATA": "#adb5bd",
-        "ORBIT": "#74c0fc",
+    # Labelled KG colors
+    if label_view == "Subsystem":
+        return {
+            "TELECOM": "#ff6b6b",
+            "POWER": "#ffd43b",
+            "DATA": "#adb5bd",
+            "PAYLOAD": "#9775fa",
+            "ORBIT": "#74c0fc",
+            "GROUND": "#20c997",
+            "PROPULSION": "#ffa94d",
+            "THERMAL": "#69db7c",
+            "AOCS": "#4dabf7",
+            "OTHER": "#888888",
+            "UNKNOWN": "#B0B0B0",
+        }
+    else:
+        return {
+            "MISSION": "#4C78A8",
+            "ORBIT": "#74c0fc",
+            "PAYLOAD": "#9775fa",
+            "INSTRUMENT": "#E45756",
+            "GROUND": "#20c997",
+            "SUBSYSTEM": "#ffa94d",
+            "TARGET_REGION": "#54A24B",
+            "PARAMETER": "#ffd43b",
+            "ORG": "#72B7B2",
+            "LOC": "#59A14F",
+            "OTHER": "#888888",
+            "UNKNOWN": "#B0B0B0",
+        }
 
-        "MISSION": "#4C78A8",
-        "PROGRAMME": "#72B7B2",
-        "TARGET_REGION": "#54A24B",
-        "SCIENCE_OBJECTIVE": "#B279A2",
-        "MEASUREMENT": "#E45756",
-        "MODELING": "#9c755f",
-        "CONCEPT": "#b279a2",
 
-        "OTHER": "#888888",
-        "UNKNOWN": "#B0B0B0",
-    }
+def safe_label(x: str) -> str:
+    """
+    Normalizes empty/None labels.
+    """
+    s = (x or "").strip()
+    if not s or s.upper() == "O":
+        return "UNKNOWN"
+    return s.upper() if len(s) <= 32 else "UNKNOWN"
 
 
 # -----------------------------
@@ -169,7 +124,7 @@ def color_map_for_mode(mode: str) -> dict:
 st.set_page_config(page_title="Knowledge Graph Simulator", layout="wide")
 st.title("Knowledge Graph Simulator")
 st.caption(
-    "Web Graph (NER + co-occurrence) + Labelled KG (class mapping). "
+    "Web Graph (NER + co-occurrence) + Labelled KG (mission + subsystem class mapping). "
     "Analytics, coloring, export, filters."
 )
 
@@ -186,7 +141,6 @@ if "co_builder" not in st.session_state:
     st.session_state.co_builder = CooccurrenceGraphBuilder()
 
 if "labelled_builder" not in st.session_state:
-    # If your LabelledSubsystemKGBuilder requires params, pass them here.
     st.session_state.labelled_builder = LabelledSubsystemKGBuilder() if LabelledSubsystemKGBuilder else None
 
 if "last_input_text" not in st.session_state:
@@ -194,6 +148,7 @@ if "last_input_text" not in st.session_state:
 
 if "last_raw_graph" not in st.session_state:
     st.session_state.last_raw_graph = nx.Graph()
+
 
 # -----------------------------
 # Sidebar controls
@@ -205,9 +160,19 @@ with st.sidebar:
         "Graph Mode",
         ["Web Graph", "Labelled Subsystem KG"],
         index=0,
-        help="Web Graph: standard NER + co-occurrence. Labelled Subsystem KG: class labels assigned to nodes.",
+        help="Web Graph: standard NER + co-occurrence. Labelled Subsystem KG: mission/subsystem labels assigned to nodes.",
         key="graph_mode_radio",
     )
+
+    label_view = None
+    if graph_mode == "Labelled Subsystem KG":
+        label_view = st.radio(
+            "Label View",
+            ["Subsystem", "Mission Structure"],
+            index=0,
+            help="Subsystem: TELECOM/POWER/...  |  Mission Structure: MISSION/INSTRUMENT/TARGET_REGION/...",
+            key="label_view_radio",
+        )
 
     st.divider()
 
@@ -230,9 +195,9 @@ with st.sidebar:
             "UNKNOWN": st.checkbox("Show UNKNOWN", True, key="web_show_unknown"),
         }
     else:
-        defaults = get_labelled_show_types()
+        defaults = get_labelled_show_types(label_view)
         show_types = {
-            k: st.checkbox(f"Show {k}", defaults[k], key=f"lab_show_{k.lower()}")
+            k: st.checkbox(f"Show {k}", defaults[k], key=f"lab_show_{label_view.lower()}_{k.lower()}")
             for k in defaults.keys()
         }
 
@@ -243,7 +208,7 @@ with st.sidebar:
                 "and define LabelledSubsystemKGBuilder."
             )
         else:
-            st.caption("Labels come from your labelled KG builder (lexicon or model).")
+            st.caption("Labels come from the labelled KG builder.")
 
     st.divider()
 
@@ -253,6 +218,7 @@ with st.sidebar:
         st.session_state.last_raw_graph = nx.Graph()
         st.success("Graph cleared")
         st.rerun()
+
 
 # -----------------------------
 # Layout
@@ -283,9 +249,6 @@ with col_graph:
             st.session_state.last_input_text = text_input
             st.session_state.graph_manager.reset_graph()
 
-            # -----------------------------
-            # Build raw graph
-            # -----------------------------
             if graph_mode == "Web Graph":
                 raw_g = st.session_state.co_builder.build(text_input)
 
@@ -296,7 +259,6 @@ with col_graph:
                     edges_for_manager.append((u, label, v, confidence))
                 st.session_state.graph_manager.add_triples(edges_for_manager)
 
-                # Ensure node type exists for exports
                 base_g = st.session_state.graph_manager.get_graph()
                 for n in base_g.nodes():
                     base_g.nodes[n]["entity_type"] = "UNKNOWN"
@@ -319,15 +281,17 @@ with col_graph:
                         edges_for_manager.append((u, label, v, confidence))
                     st.session_state.graph_manager.add_triples(edges_for_manager)
 
-                    # Copy node types to manager graph so exports include them
+                    # Copy BOTH labels into base_g node attributes for visualization/export
                     base_g = st.session_state.graph_manager.get_graph()
                     for n in base_g.nodes():
-                        base_g.nodes[n]["entity_type"] = "UNKNOWN"
+                        base_g.nodes[n]["subsystem_label"] = "UNKNOWN"
+                        base_g.nodes[n]["structure_label"] = "UNKNOWN"
+                        base_g.nodes[n]["confidence"] = float(base_g.nodes[n].get("confidence", 0.0))
 
                     for n, attrs in raw_g.nodes(data=True):
                         if n in base_g.nodes:
-                            t = attrs.get("entity_type") or "UNKNOWN"
-                            base_g.nodes[n]["entity_type"] = normalize_subsystem_label(t)
+                            base_g.nodes[n]["subsystem_label"] = safe_label(attrs.get("subsystem_label", "UNKNOWN"))
+                            base_g.nodes[n]["structure_label"] = safe_label(attrs.get("structure_label", "UNKNOWN"))
                             if "confidence" in attrs:
                                 base_g.nodes[n]["confidence"] = float(attrs.get("confidence", 0.0))
 
@@ -355,9 +319,11 @@ with col_graph:
                 viz.add_node(n, entity_type=t)
 
     else:
+        # Choose which label set to display
+        use_key = "subsystem_label" if label_view == "Subsystem" else "structure_label"
+
         for n in base_g.nodes():
-            t = base_g.nodes[n].get("entity_type", "UNKNOWN")
-            t = normalize_subsystem_label(t)
+            t = safe_label(base_g.nodes[n].get(use_key, "UNKNOWN"))
             if t not in show_types:
                 t = "UNKNOWN"
             if show_types.get(t, False):
@@ -377,13 +343,14 @@ with col_graph:
     if viz.number_of_nodes() > 0 and viz.number_of_edges() > 0:
         net = Network(height="600px", width="100%", bgcolor="#111111", font_color="white", directed=True)
 
-        cmap = color_map_for_mode(graph_mode)
+        cmap = color_map_for_mode(graph_mode, label_view or "Subsystem")
         degrees = dict(viz.degree())
 
-        # ✅ show [TYPE] on node label itself
         for node, attrs in viz.nodes(data=True):
             t = attrs.get("entity_type", "UNKNOWN")
             node_conf = float(base_g.nodes[node].get("confidence", 0.0)) if node in base_g.nodes else 0.0
+
+            # show label above node as "Name [TYPE]"
             node_label = f"{node}\n[{t}]"
 
             net.add_node(
@@ -448,6 +415,7 @@ with col_graph:
                 st.write("Stored edges:", base_g.number_of_edges())
                 st.write("Shown nodes:", viz.number_of_nodes())
                 st.write("Shown edges:", viz.number_of_edges())
+
 
 # -----------------------------
 # Analytics / exports column
