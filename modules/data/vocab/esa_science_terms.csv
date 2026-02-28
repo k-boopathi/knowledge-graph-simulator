@@ -1,0 +1,45 @@
+term,subsystem,confidence
+radiance,PAYLOAD,0.9
+spectral resolution,PAYLOAD,0.9
+spectrometer,PAYLOAD,0.95
+radiometer,PAYLOAD,0.95
+lidar,PAYLOAD,0.95
+synthetic aperture radar,PAYLOAD,0.95
+altimeter,PAYLOAD,0.9
+detector,PAYLOAD,0.85
+geophysical product,DATA,0.8
+retrieval algorithm,DATA,0.85
+processing chain,DATA,0.8
+mass memory,DATA,0.9
+data volume,DATA,0.75
+downlink rate,TELECOM,0.9
+uplink rate,TELECOM,0.9
+bit rate,TELECOM,0.9
+link budget,TELECOM,0.9
+carrier frequency,TELECOM,0.9
+bandwidth,TELECOM,0.85
+solar array,POWER,0.95
+battery capacity,POWER,0.85
+bus voltage,POWER,0.85
+power conditioning,POWER,0.9
+delta-v,PROPULSION,0.9
+thruster,PROPULSION,0.95
+propellant mass,PROPULSION,0.9
+station keeping,PROPULSION,0.8
+reaction wheel,AOCS,0.95
+star tracker,AOCS,0.95
+attitude determination,AOCS,0.9
+orbit determination,AOCS,0.9
+heat pipe,THERMAL,0.9
+radiator panel,THERMAL,0.9
+thermal control,THERMAL,0.9
+multi-layer insulation,THERMAL,0.95
+sun-synchronous orbit,ORBIT,0.95
+low earth orbit,ORBIT,0.95
+inclination,ORBIT,0.85
+ascending node,ORBIT,0.85
+apogee,ORBIT,0.85
+perigee,ORBIT,0.85
+ground segment,GROUND,0.9
+mission operations,GROUND,0.85
+tracking station,GROUND,0.9
