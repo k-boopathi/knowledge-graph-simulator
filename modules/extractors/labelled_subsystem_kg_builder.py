@@ -26,7 +26,7 @@ class OntologyMapResult:
     ontology_class: str
     parent_class: str
     confidence: float
-    method: str  # "subsystem" | "ner" | "value" | "fallback" | "vocab"
+    method: str  # "subsystem" | "ner" | "value" | "fallback"
 
 
 class SubsystemOntology:
@@ -35,7 +35,6 @@ class SubsystemOntology:
     """
 
     def __init__(self):
-        # ontology classes (subsystems + generic types)
         self.classes = {
             "TelecomComponent",
             "PowerComponent",
@@ -47,7 +46,6 @@ class SubsystemOntology:
             "GroundSegmentAsset",
             "OrbitParameter",
             "ScienceTerm",
-            "Mission",          # ✅ added
             "Organization",
             "Location",
             "Person",
@@ -56,7 +54,6 @@ class SubsystemOntology:
             "Unknown",
         }
 
-        # Allowed relation schema (domain, predicate, range)
         self.relations = {
             ("TelecomComponent", "has_component", "TelecomComponent"),
             ("PowerComponent", "has_component", "PowerComponent"),
@@ -84,10 +81,6 @@ class SubsystemOntology:
     def map_node(self, node_text: str, subsystem_label: str, node_kind: str = "CONCEPT") -> OntologyMapResult:
         sub = (subsystem_label or "UNKNOWN").upper().strip()
         nk = (node_kind or "CONCEPT").upper().strip()
-
-        # ✅ mission node kind
-        if nk in {"MISSION"}:
-            return OntologyMapResult("Mission", "Concept", 0.95, "vocab")
 
         if nk in {"ORG"}:
             return OntologyMapResult("Organization", "Concept", 0.85, "ner")
@@ -120,7 +113,6 @@ class SubsystemOntology:
         return OntologyMapResult("Unknown", "Concept", 0.35, "fallback")
 
     def is_valid(self, subj_class: str, predicate: str, obj_class: str) -> bool:
-        # allow co-occurrence always
         if predicate == "co-occurs":
             return True
         return (subj_class, predicate, obj_class) in self.relations
@@ -136,8 +128,8 @@ class LabeledSpan:
     start: int
     end: int
     confidence: float = 0.60
-    node_kind: str = "CONCEPT"  # SUBSYSTEM_TERM | SCI_TERM | VALUE | ORG | LOC | PERSON | MISSION | CONCEPT
-    source: str = "heuristic"   # acronym | science_vocab | mission_vocab | lexicon | ner | pattern | heuristic
+    node_kind: str = "CONCEPT"
+    source: str = "heuristic"
 
 
 class LabelledSubsystemKGBuilder:
@@ -152,7 +144,6 @@ class LabelledSubsystemKGBuilder:
         vocab_dir: Optional[str] = None,
         enable_ontology_validation: bool = True,
     ):
-        # Keep parser + ner; disable lemmatizer for speed
         self.nlp = spacy.load(spacy_model, disable=["lemmatizer"])
         if "sentencizer" not in self.nlp.pipe_names:
             self.nlp.add_pipe("sentencizer", first=True)
@@ -161,14 +152,9 @@ class LabelledSubsystemKGBuilder:
         self.enable_ontology_validation = enable_ontology_validation
         self._raw_text: str = ""
 
-        # internal subsystem ontology (safe, always available)
         self.sub_ontology = SubsystemOntology()
-
         self.external_ontology = ExternalOntology() if ExternalOntology else None
 
-        # -------------------------
-        # Baseline ESA-tuned subsystem lexicon (expanded)
-        # -------------------------
         self.subsystem_lexicon: Dict[str, List[str]] = {
             "TELECOM": [
                 "telemetry", "telecommand", "ttc", "tt&c", "tt & c", "tm", "tc",
@@ -294,19 +280,15 @@ class LabelledSubsystemKGBuilder:
             r"\b(?:TT&C|CDHS|EPS|PCDU|PDHT|PDGS|FOCC|FOS|ESTRACK|SSMM|OBC|RIU|RTU|LCL|MPPT)\b",
         ]
 
-        # -------------------------
-        # Load curated vocab files
-        # -------------------------
         if vocab_dir is None:
-            here = os.path.dirname(os.path.abspath(__file__))       # .../modules/extractors
+            here = os.path.dirname(os.path.abspath(__file__))
             project_root = os.path.abspath(os.path.join(here, "..", ".."))
             vocab_dir = os.path.join(project_root, "data", "vocab")
 
         self.vocab_dir = vocab_dir
         self.acronym_to_subsystem: Dict[str, str] = {}
         self.acronym_expansions: Dict[str, str] = {}
-        self.science_terms: Dict[str, Tuple[str, float]] = {}          # term_low -> (subsystem, conf)
-        self.missions: Dict[str, Tuple[str, str]] = {}                  # ✅ name_low -> (canonical, type)
+        self.science_terms: Dict[str, Tuple[str, float]] = {}
 
         self._load_vocab_files(self.vocab_dir)
 
@@ -345,7 +327,9 @@ class LabelledSubsystemKGBuilder:
             if node in g:
                 if s.confidence > float(g.nodes[node].get("confidence", 0.0)):
                     g.nodes[node]["subsystem_label"] = s.subsystem
+                    g.nodes[node]["subsystem"] = s.subsystem          # analytics compat
                     g.nodes[node]["confidence"] = float(s.confidence)
+                    g.nodes[node]["conf"] = float(s.confidence)       # analytics compat
                     g.nodes[node]["node_kind"] = s.node_kind
                     g.nodes[node]["source"] = s.source
                 continue
@@ -353,7 +337,9 @@ class LabelledSubsystemKGBuilder:
             g.add_node(
                 node,
                 subsystem_label=s.subsystem,
+                subsystem=s.subsystem,                 # ✅ analytics compat
                 confidence=float(s.confidence),
+                conf=float(s.confidence),              # ✅ analytics compat
                 node_kind=s.node_kind,
                 source=s.source,
                 start=int(s.start),
@@ -395,13 +381,19 @@ class LabelledSubsystemKGBuilder:
                     g.add_node(
                         v2,
                         subsystem_label="OTHER",
+                        subsystem="OTHER",                 # ✅ analytics compat
                         confidence=float(conf),
+                        conf=float(conf),                  # ✅ analytics compat
                         node_kind="VALUE" if self._looks_like_value(v2) else "CONCEPT",
                         source="pattern",
                         start=-1,
                         end=-1,
                     )
-                    res = self.sub_ontology.map_node(v2, g.nodes[v2].get("subsystem_label", "UNKNOWN"), g.nodes[v2].get("node_kind", "CONCEPT"))
+                    res = self.sub_ontology.map_node(
+                        v2,
+                        g.nodes[v2].get("subsystem_label", "UNKNOWN"),
+                        g.nodes[v2].get("node_kind", "CONCEPT")
+                    )
                     g.nodes[v2]["ontology_class"] = res.ontology_class
                     g.nodes[v2]["ontology_parent"] = res.parent_class
                     g.nodes[v2]["ontology_conf"] = float(res.confidence)
@@ -417,11 +409,13 @@ class LabelledSubsystemKGBuilder:
                         continue
                     self._add_edge(g, hub, n, "co-occurs", 0.35)
 
+        # Conservative ontology validation pass
         if self.enable_ontology_validation:
             self._validate_edges(g)
 
-        isolates = [n for n in list(g.nodes()) if g.degree(n) == 0]
-        g.remove_nodes_from(isolates)
+        # IMPORTANT: do NOT delete isolates (keeps graph from collapsing)
+        # isolates = [n for n in list(g.nodes()) if g.degree(n) == 0]
+        # g.remove_nodes_from(isolates)
 
         return g
 
@@ -456,8 +450,11 @@ class LabelledSubsystemKGBuilder:
                 continue
 
             subsystem, conf, kind, source = self.classify_span(c, m.start(), m.end(), ner_spans)
+
+            # ✅ keep unknowns as low-confidence OTHER (do NOT drop)
             if subsystem == "UNKNOWN":
-                continue
+                subsystem, conf, kind, source = "OTHER", 0.40, "CONCEPT", "fallback"
+
             spans.append(LabeledSpan(text=c, subsystem=subsystem, start=m.start(), end=m.end(), confidence=conf, node_kind=kind, source=source))
 
         # 2) noun chunks
@@ -483,8 +480,11 @@ class LabelledSubsystemKGBuilder:
                     continue
 
                 subsystem, conf, kind, source = self.classify_span(c, chunk.start_char, chunk.end_char, ner_spans)
+
+                # ✅ keep unknowns as low-confidence OTHER (do NOT drop)
                 if subsystem == "UNKNOWN":
-                    continue
+                    subsystem, conf, kind, source = "OTHER", 0.40, "CONCEPT", "fallback"
+
                 spans.append(LabeledSpan(text=c, subsystem=subsystem, start=chunk.start_char, end=chunk.end_char, confidence=conf, node_kind=kind, source=source))
 
         # 3) regex anchors
@@ -494,30 +494,34 @@ class LabelledSubsystemKGBuilder:
                 c = self.canon_display(txt)
                 if not c:
                     continue
+
                 subsystem, conf, kind, source = self.classify_span(c, m.start(), m.end(), ner_spans)
+
+                # ✅ keep unknowns as low-confidence OTHER (do NOT drop)
                 if subsystem == "UNKNOWN":
-                    continue
+                    subsystem, conf, kind, source = "OTHER", 0.40, "CONCEPT", "fallback"
+
                 spans.append(LabeledSpan(text=c, subsystem=subsystem, start=m.start(), end=m.end(), confidence=conf, node_kind=kind, source=source))
 
-        # 4) science terms (CSV)
+        # 4) science terms (CSV) — capture ALL occurrences (not only first)
         for term_low, (sub, conf0) in self.science_terms.items():
             if len(term_low) < 4:
                 continue
-            if re.search(rf"(?<!\w){re.escape(term_low)}(?!\w)", raw_low):
-                idx = raw_low.find(term_low)
-                if idx >= 0:
-                    spans.append(
-                        LabeledSpan(
-                            text=raw_text[idx:idx + len(term_low)],
-                            subsystem=sub,
-                            start=idx,
-                            end=idx + len(term_low),
-                            confidence=min(0.88, max(0.60, float(conf0))),
-                            node_kind="SCI_TERM",
-                            source="science_vocab",
-                        )
+            for mm in re.finditer(rf"(?<!\w){re.escape(term_low)}(?!\w)", raw_low):
+                idx = mm.start()
+                spans.append(
+                    LabeledSpan(
+                        text=raw_text[idx:idx + len(term_low)],
+                        subsystem=sub,
+                        start=idx,
+                        end=idx + len(term_low),
+                        confidence=min(0.88, max(0.60, float(conf0))),
+                        node_kind="SCI_TERM",
+                        source="science_vocab",
                     )
+                )
 
+        # Dedup by canonical id (keep max confidence)
         best: Dict[str, LabeledSpan] = {}
         for s in spans:
             key = self.canon(s.text)
@@ -534,35 +538,24 @@ class LabelledSubsystemKGBuilder:
     def classify_span(self, span_text: str, start: int, end: int, ner_spans) -> Tuple[str, float, str, str]:
         low = span_text.lower().strip()
 
-        # Acronym override
         up = span_text.strip().upper()
         sub = self._acronym_override.get(up) or self._acronym_override.get(up.replace(" ", ""))
         if sub:
             return sub, 0.92, "SUBSYSTEM_TERM", "acronym"
 
-        # ✅ Mission vocab override (runs BEFORE NER override)
-        if low in self.missions:
-            # mission is not a subsystem, so keep subsystem_label="OTHER"
-            return "OTHER", 0.95, "MISSION", "mission_vocab"
-
-        # NER override: ORG/LOC/PERSON -> OTHER
         ner = self._ner_override(start, end, ner_spans)
         if ner in {"ORG", "LOC", "PERSON"}:
             return "OTHER", 0.70, ner, "ner"
 
-        # Direct science-term hit
         if low in self.science_terms:
             s2, c0 = self.science_terms[low]
             return s2, float(min(0.88, max(0.60, c0))), "SCI_TERM", "science_vocab"
 
-        # Lexicon scoring
         best_lab, best_hits = self._best_label(low)
 
-        # Context tie-break
         window = self._context_window(start, end, self._raw_text, win=160)
         best_lab = self._tie_break(best_lab, window, span_text)
 
-        # Confidence
         if best_hits >= 4:
             conf = 0.90
         elif best_hits >= 2:
@@ -774,12 +767,6 @@ class LabelledSubsystemKGBuilder:
     # Vocab loading
     # -----------------------------
     def _load_vocab_files(self, vocab_dir: str) -> None:
-        """
-        Loads:
-          - data/vocab/esa_acronym_map.json
-          - data/vocab/esa_science_terms.csv
-          - data/vocab/esa_missions.csv   ✅ added
-        """
         if not vocab_dir or not os.path.isdir(vocab_dir):
             return
 
@@ -819,21 +806,5 @@ class LabelledSubsystemKGBuilder:
                         except Exception:
                             conf = 0.75
                         self.science_terms[term.lower()] = (sub, float(conf))
-            except Exception:
-                pass
-
-        # ✅ Missions CSV
-        missions_path = os.path.join(vocab_dir, "esa_missions.csv")
-        if os.path.exists(missions_path):
-            try:
-                with open(missions_path, "r", encoding="utf-8") as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        name = (row.get("name") or "").strip()
-                        canonical = (row.get("canonical") or name).strip()
-                        typ = (row.get("type") or "MISSION").strip().upper()
-                        if not name:
-                            continue
-                        self.missions[name.lower()] = (canonical, typ)
             except Exception:
                 pass
