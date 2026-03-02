@@ -26,7 +26,7 @@ class OntologyMapResult:
     ontology_class: str
     parent_class: str
     confidence: float
-    method: str  # "subsystem" | "ner" | "value" | "fallback"
+    method: str  # "subsystem" | "ner" | "value" | "fallback" | "mission"
 
 
 class SubsystemOntology:
@@ -46,6 +46,7 @@ class SubsystemOntology:
             "GroundSegmentAsset",
             "OrbitParameter",
             "ScienceTerm",
+            "Mission",
             "Organization",
             "Location",
             "Person",
@@ -54,6 +55,7 @@ class SubsystemOntology:
             "Unknown",
         }
 
+        # Allowed relation schema (domain, predicate, range)
         self.relations = {
             ("TelecomComponent", "has_component", "TelecomComponent"),
             ("PowerComponent", "has_component", "PowerComponent"),
@@ -66,6 +68,7 @@ class SubsystemOntology:
 
             ("PayloadComponent", "measures", "ScienceTerm"),
             ("PayloadComponent", "measures", "Value"),
+
             ("TelecomComponent", "has_limit_max", "Value"),
             ("TelecomComponent", "has_limit_min", "Value"),
             ("TelecomComponent", "has_range", "Value"),
@@ -82,6 +85,8 @@ class SubsystemOntology:
         sub = (subsystem_label or "UNKNOWN").upper().strip()
         nk = (node_kind or "CONCEPT").upper().strip()
 
+        if nk in {"MISSION"}:
+            return OntologyMapResult("Mission", "Concept", 0.88, "mission")
         if nk in {"ORG"}:
             return OntologyMapResult("Organization", "Concept", 0.85, "ner")
         if nk in {"LOC"}:
@@ -128,13 +133,22 @@ class LabeledSpan:
     start: int
     end: int
     confidence: float = 0.60
-    node_kind: str = "CONCEPT"
-    source: str = "heuristic"
+    node_kind: str = "CONCEPT"   # SUBSYSTEM_TERM | SCI_TERM | VALUE | ORG | LOC | PERSON | MISSION | CONCEPT
+    source: str = "heuristic"    # acronym | science_vocab | lexicon | ner | mission_vocab | pattern | fallback
 
 
 class LabelledSubsystemKGBuilder:
     """
     ESA-friendly subsystem KG builder (Subsystem-only).
+
+    IMPORTANT FIXES in this version:
+      - Hard junk filtering: removes pronouns/stop tokens like "that", "play", etc.
+      - TitleCase UNKNOWN spans are dropped (they were a big junk source)
+      - noun_chunks / anchors UNKNOWN spans become OTHER (keeps recall without collapse)
+      - Science vocab matches ALL occurrences (not just first)
+      - Keeps isolates (do not delete nodes just because no edges)
+      - Adds mission vocab support: data/vocab/esa_missions.csv to stop CAIRT being ORG/OTHER noise
+      - Adds analytics-compatible keys: subsystem + conf in addition to subsystem_label + confidence
     """
 
     def __init__(
@@ -155,6 +169,9 @@ class LabelledSubsystemKGBuilder:
         self.sub_ontology = SubsystemOntology()
         self.external_ontology = ExternalOntology() if ExternalOntology else None
 
+        # -------------------------
+        # ESA-tuned subsystem lexicon
+        # -------------------------
         self.subsystem_lexicon: Dict[str, List[str]] = {
             "TELECOM": [
                 "telemetry", "telecommand", "ttc", "tt&c", "tt & c", "tm", "tc",
@@ -248,6 +265,7 @@ class LabelledSubsystemKGBuilder:
             ],
         }
 
+        # Tie-break helpers
         self.ground_strong_cues = [
             "pdgs", "focc", "fos", "estrack", "kiruna", "svalbard",
             "mission planning", "ground segment", "mcs", "mps", "fds",
@@ -263,6 +281,21 @@ class LabelledSubsystemKGBuilder:
             "downlink", "uplink",
         ]
 
+        # Junk filtering: kill pronouns / glue words / non-entities
+        self.bad_single_tokens = {
+            "the", "a", "an", "this", "that", "these", "those",
+            "it", "its", "they", "their", "them", "we", "you", "i", "he", "she",
+            "our", "your", "and", "or", "but", "so", "because",
+            "no", "not", "none", "other", "many", "more", "most",
+            "such", "also", "however", "there", "here", "then", "than",
+        }
+        # if a span is a single word and is one of these, treat as junk
+        self.bad_single_verbs = {
+            "be", "have", "do", "make", "play", "use", "provide", "include", "measure", "reveal",
+            "show", "map", "help", "allow", "improve", "advance", "deliver",
+        }
+
+        # Junk phrase filtering
         self.stop_phrases = {
             "the mission", "the spacecraft", "the satellite", "the instrument",
             "the payload", "the system", "this mission", "this instrument",
@@ -273,6 +306,7 @@ class LabelledSubsystemKGBuilder:
         }
         self.determiner_prefix = ("the ", "a ", "an ", "this ", "that ", "these ", "those ")
 
+        # Regex anchors (kept as nodes)
         self.token_patterns = [
             r"\b(?:sun-?synchronous|low earth orbit|leo|near-?polar)\b",
             r"\b\d{2,4}\s?km\b",
@@ -280,27 +314,34 @@ class LabelledSubsystemKGBuilder:
             r"\b(?:TT&C|CDHS|EPS|PCDU|PDHT|PDGS|FOCC|FOS|ESTRACK|SSMM|OBC|RIU|RTU|LCL|MPPT)\b",
         ]
 
+        # -------------------------
+        # Load curated vocab files
+        # -------------------------
         if vocab_dir is None:
-            here = os.path.dirname(os.path.abspath(__file__))
+            here = os.path.dirname(os.path.abspath(__file__))       # .../modules/extractors
             project_root = os.path.abspath(os.path.join(here, "..", ".."))
             vocab_dir = os.path.join(project_root, "data", "vocab")
 
         self.vocab_dir = vocab_dir
         self.acronym_to_subsystem: Dict[str, str] = {}
         self.acronym_expansions: Dict[str, str] = {}
-        self.science_terms: Dict[str, Tuple[str, float]] = {}
+        self.science_terms: Dict[str, Tuple[str, float]] = {}  # term_low -> (subsystem, conf)
+        self.missions: Dict[str, str] = {}  # name_low -> canonical
 
         self._load_vocab_files(self.vocab_dir)
 
+        # Acronym override map
         self._acronym_override: Dict[str, str] = {}
         for acr, sub in self.acronym_to_subsystem.items():
             self._acronym_override[acr.upper()] = sub
             self._acronym_override[acr.upper().replace(" ", "")] = sub
 
+        # Optionally expand subsystem lexicon with science terms (helps recall)
         for term_low, (sub, _) in self.science_terms.items():
             if sub in self.subsystem_lexicon and len(term_low) >= 4 and term_low not in {"mission", "spacecraft", "system"}:
                 self.subsystem_lexicon[sub].append(term_low)
 
+        # Precompile lexicon patterns
         self._compiled: Dict[str, List[re.Pattern]] = {
             label: [self._compile_term(t) for t in sorted(set(terms), key=lambda x: (-len(x), x))]
             for label, terms in self.subsystem_lexicon.items()
@@ -327,9 +368,9 @@ class LabelledSubsystemKGBuilder:
             if node in g:
                 if s.confidence > float(g.nodes[node].get("confidence", 0.0)):
                     g.nodes[node]["subsystem_label"] = s.subsystem
-                    g.nodes[node]["subsystem"] = s.subsystem          # analytics compat
+                    g.nodes[node]["subsystem"] = s.subsystem           # analytics compat
                     g.nodes[node]["confidence"] = float(s.confidence)
-                    g.nodes[node]["conf"] = float(s.confidence)       # analytics compat
+                    g.nodes[node]["conf"] = float(s.confidence)        # analytics compat
                     g.nodes[node]["node_kind"] = s.node_kind
                     g.nodes[node]["source"] = s.source
                 continue
@@ -337,9 +378,9 @@ class LabelledSubsystemKGBuilder:
             g.add_node(
                 node,
                 subsystem_label=s.subsystem,
-                subsystem=s.subsystem,                 # ✅ analytics compat
+                subsystem=s.subsystem,                 # analytics compat
                 confidence=float(s.confidence),
-                conf=float(s.confidence),              # ✅ analytics compat
+                conf=float(s.confidence),              # analytics compat
                 node_kind=s.node_kind,
                 source=s.source,
                 start=int(s.start),
@@ -381,19 +422,15 @@ class LabelledSubsystemKGBuilder:
                     g.add_node(
                         v2,
                         subsystem_label="OTHER",
-                        subsystem="OTHER",                 # ✅ analytics compat
+                        subsystem="OTHER",                 # analytics compat
                         confidence=float(conf),
-                        conf=float(conf),                  # ✅ analytics compat
+                        conf=float(conf),                  # analytics compat
                         node_kind="VALUE" if self._looks_like_value(v2) else "CONCEPT",
                         source="pattern",
                         start=-1,
                         end=-1,
                     )
-                    res = self.sub_ontology.map_node(
-                        v2,
-                        g.nodes[v2].get("subsystem_label", "UNKNOWN"),
-                        g.nodes[v2].get("node_kind", "CONCEPT")
-                    )
+                    res = self.sub_ontology.map_node(v2, g.nodes[v2].get("subsystem_label", "UNKNOWN"), g.nodes[v2].get("node_kind", "CONCEPT"))
                     g.nodes[v2]["ontology_class"] = res.ontology_class
                     g.nodes[v2]["ontology_parent"] = res.parent_class
                     g.nodes[v2]["ontology_conf"] = float(res.confidence)
@@ -425,24 +462,49 @@ class LabelledSubsystemKGBuilder:
     def extract_spans(self, doc, raw_text: str) -> List[LabeledSpan]:
         spans: List[LabeledSpan] = []
         ner_spans = [(e.start_char, e.end_char, e.label_, e.text) for e in doc.ents]
-
         raw_low = raw_text.lower()
 
-        # 0) Acronym tokens (high precision)
+        # 0) Mission vocab (highest priority for names like CAIRT/Nitrosat/Seastar…)
+        # match whole-word occurrences of mission short names (case-insensitive)
+        if self.missions:
+            for name_low, canonical in self.missions.items():
+                if len(name_low) < 3:
+                    continue
+                for mm in re.finditer(rf"(?<!\w){re.escape(name_low)}(?!\w)", raw_low):
+                    idx = mm.start()
+                    disp = raw_text[idx:idx + len(name_low)]
+                    c = self.canon_display(disp)
+                    if not c or self._is_garbage_node(c):
+                        continue
+                    spans.append(
+                        LabeledSpan(
+                            text=c,
+                            subsystem="OTHER",          # missions are not subsystems; keep as Concept nodes
+                            start=idx,
+                            end=idx + len(name_low),
+                            confidence=0.88,
+                            node_kind="MISSION",
+                            source="mission_vocab",
+                        )
+                    )
+
+        # 1) Acronym tokens (high precision)
         for m in re.finditer(r"\b[A-Z][A-Z0-9&/\-]{1,20}\b", raw_text):
             txt = raw_text[m.start():m.end()]
             c = self.canon_display(txt)
-            if not c:
+            if not c or self._is_garbage_node(c):
                 continue
             lab = self._acronym_override.get(c.upper()) or self._acronym_override.get(c.upper().replace(" ", ""))
             if lab:
                 spans.append(LabeledSpan(text=c, subsystem=lab, start=m.start(), end=m.end(), confidence=0.92, node_kind="SUBSYSTEM_TERM", source="acronym"))
 
-        # 1) TitleCase phrases
+        # 2) TitleCase phrases (STRICT: drop UNKNOWN to avoid junk)
         for m in re.finditer(r"\b(?:[A-Z][a-zA-Z0-9\-]+(?:\s+[A-Z][a-zA-Z0-9\-]+){0,4})\b", raw_text):
             txt = raw_text[m.start():m.end()]
             c = self.canon_display(txt)
             if not c or len(c) < 3:
+                continue
+            if self._is_garbage_node(c):
                 continue
 
             low = c.lower()
@@ -451,27 +513,31 @@ class LabelledSubsystemKGBuilder:
 
             subsystem, conf, kind, source = self.classify_span(c, m.start(), m.end(), ner_spans)
 
-            # ✅ keep unknowns as low-confidence OTHER (do NOT drop)
+            # STRICT: titlecase unknowns are mostly narrative/junk
             if subsystem == "UNKNOWN":
-                subsystem, conf, kind, source = "OTHER", 0.40, "CONCEPT", "fallback"
+                continue
 
             spans.append(LabeledSpan(text=c, subsystem=subsystem, start=m.start(), end=m.end(), confidence=conf, node_kind=kind, source=source))
 
-        # 2) noun chunks
+        # 3) noun chunks (keep UNKNOWN as OTHER to preserve recall, but filter junk hard)
         if self.enable_noun_chunks and doc.has_annotation("DEP"):
             for chunk in doc.noun_chunks:
                 txt = chunk.text.strip()
                 c = self.canon_display(txt)
                 if not c:
                     continue
-                low = c.lower()
 
-                if low.startswith(self.determiner_prefix):
+                # strip determiners in display form
+                low0 = c.lower()
+                if low0.startswith(self.determiner_prefix):
                     c2 = self.canon_display(re.sub(r"^(the|a|an|this|that|these|those)\s+", "", c, flags=re.I))
                     if c2:
                         c = c2
-                        low = c.lower()
 
+                if self._is_garbage_node(c):
+                    continue
+
+                low = c.lower()
                 if low in self.stop_phrases:
                     continue
                 if len(c.split()) > 7:
@@ -481,37 +547,40 @@ class LabelledSubsystemKGBuilder:
 
                 subsystem, conf, kind, source = self.classify_span(c, chunk.start_char, chunk.end_char, ner_spans)
 
-                # ✅ keep unknowns as low-confidence OTHER (do NOT drop)
+                # keep unknown noun chunks as low-confidence OTHER (but they are nouns)
                 if subsystem == "UNKNOWN":
                     subsystem, conf, kind, source = "OTHER", 0.40, "CONCEPT", "fallback"
 
                 spans.append(LabeledSpan(text=c, subsystem=subsystem, start=chunk.start_char, end=chunk.end_char, confidence=conf, node_kind=kind, source=source))
 
-        # 3) regex anchors
+        # 4) regex anchors (keep UNKNOWN as OTHER; anchors are meaningful)
         for pat in self.token_patterns:
             for m in re.finditer(pat, raw_text, flags=re.I):
                 txt = raw_text[m.start():m.end()]
                 c = self.canon_display(txt)
-                if not c:
+                if not c or self._is_garbage_node(c):
                     continue
 
                 subsystem, conf, kind, source = self.classify_span(c, m.start(), m.end(), ner_spans)
 
-                # ✅ keep unknowns as low-confidence OTHER (do NOT drop)
                 if subsystem == "UNKNOWN":
                     subsystem, conf, kind, source = "OTHER", 0.40, "CONCEPT", "fallback"
 
                 spans.append(LabeledSpan(text=c, subsystem=subsystem, start=m.start(), end=m.end(), confidence=conf, node_kind=kind, source=source))
 
-        # 4) science terms (CSV) — capture ALL occurrences (not only first)
+        # 5) science terms (CSV) — capture ALL occurrences
         for term_low, (sub, conf0) in self.science_terms.items():
             if len(term_low) < 4:
                 continue
             for mm in re.finditer(rf"(?<!\w){re.escape(term_low)}(?!\w)", raw_low):
                 idx = mm.start()
+                disp = raw_text[idx:idx + len(term_low)]
+                c = self.canon_display(disp)
+                if not c or self._is_garbage_node(c):
+                    continue
                 spans.append(
                     LabeledSpan(
-                        text=raw_text[idx:idx + len(term_low)],
+                        text=c,
                         subsystem=sub,
                         start=idx,
                         end=idx + len(term_low),
@@ -538,24 +607,37 @@ class LabelledSubsystemKGBuilder:
     def classify_span(self, span_text: str, start: int, end: int, ner_spans) -> Tuple[str, float, str, str]:
         low = span_text.lower().strip()
 
+        # mission override (if a span equals a mission name, keep as mission concept)
+        if low in self.missions:
+            return "OTHER", 0.88, "MISSION", "mission_vocab"
+
+        # Acronym override
         up = span_text.strip().upper()
         sub = self._acronym_override.get(up) or self._acronym_override.get(up.replace(" ", ""))
         if sub:
             return sub, 0.92, "SUBSYSTEM_TERM", "acronym"
 
+        # NER override: ORG/LOC/PERSON -> OTHER (but keep node_kind for ontology)
         ner = self._ner_override(start, end, ner_spans)
         if ner in {"ORG", "LOC", "PERSON"}:
+            # IMPORTANT: if it's a known mission, DO NOT let NER force ORG
+            if low in self.missions:
+                return "OTHER", 0.88, "MISSION", "mission_vocab"
             return "OTHER", 0.70, ner, "ner"
 
+        # Direct science-term hit (exact)
         if low in self.science_terms:
             s2, c0 = self.science_terms[low]
             return s2, float(min(0.88, max(0.60, c0))), "SCI_TERM", "science_vocab"
 
+        # Lexicon scoring
         best_lab, best_hits = self._best_label(low)
 
+        # Context tie-break
         window = self._context_window(start, end, self._raw_text, win=160)
         best_lab = self._tie_break(best_lab, window, span_text)
 
+        # Confidence
         if best_hits >= 4:
             conf = 0.90
         elif best_hits >= 2:
@@ -563,6 +645,7 @@ class LabelledSubsystemKGBuilder:
         elif best_hits >= 1:
             conf = 0.62
         else:
+            # keep orbit/value anchors
             if self._looks_like_value(low) or re.search(r"\b\d{2,4}\s?km\b", low):
                 return "ORBIT", 0.60, "VALUE", "pattern"
             return "UNKNOWN", 0.30, "CONCEPT", "heuristic"
@@ -577,30 +660,33 @@ class LabelledSubsystemKGBuilder:
     # -----------------------------
     def extract_relations(self, sent, span_nodes: List[str]) -> List[Tuple[str, str, str, float]]:
         rels: List[Tuple[str, str, str, float]] = []
-        text = sent.text.strip()
-        low = text.lower()
+        low = sent.text.lower().strip()
 
         if not span_nodes:
             return rels
 
+        # Range: between A and B (+ optional unit)
         m = re.search(r"\bbetween\s+(\d+(?:\.\d+)?)\s*([a-zA-Z%°/]+)?\s+and\s+(\d+(?:\.\d+)?)\s*([a-zA-Z%°/]+)?\b", low)
         if m:
             unit = (m.group(2) or m.group(4) or "")
             vals = f"{m.group(1)}{unit}-{m.group(3)}{unit}"
             rels.append((span_nodes[0], "has_range", vals, 0.78))
 
+        # Max
         if any(k in low for k in ["no greater than", "at most", "maximum of", "not exceed", "≤", "<="]):
             mv = re.search(r"(?:no greater than|at most|maximum of|not exceed|≤|<=)\s+(\d+(?:\.\d+)?)\s*([a-zA-Z%°/]+)?", low)
             if mv:
                 val = f"{mv.group(1)}{mv.group(2) or ''}"
                 rels.append((span_nodes[0], "has_limit_max", val, 0.80))
 
+        # Min
         if any(k in low for k in ["no less than", "at least", "minimum of", "≥", ">="]):
             mv = re.search(r"(?:no less than|at least|minimum of|≥|>=)\s+(\d+(?:\.\d+)?)\s*([a-zA-Z%°/]+)?", low)
             if mv:
                 val = f"{mv.group(1)}{mv.group(2) or ''}"
                 rels.append((span_nodes[0], "has_limit_min", val, 0.80))
 
+        # Verb relations (cheap)
         for token in sent:
             if token.lemma_ in {"have", "use", "provide", "measure", "include"}:
                 subj = [w for w in token.lefts if w.dep_ in {"nsubj", "nsubjpass"}]
@@ -645,10 +731,12 @@ class LabelledSubsystemKGBuilder:
         s = (context or "").lower()
         n = (node_text or "").lower()
 
+        # Ground beats telecom/data if strong ground cues exist
         if label in {"TELECOM", "DATA", "GROUND"}:
             if any(c in s for c in self.ground_strong_cues) or any(c in n for c in self.ground_strong_cues):
                 return "GROUND"
 
+        # DATA vs TELECOM overlap
         if label in {"TELECOM", "DATA"}:
             has_data = any(c in s for c in self.data_strong_cues) or any(c in n for c in self.data_strong_cues)
             has_tel = any(c in s for c in self.telecom_strong_cues) or any(c in n for c in self.telecom_strong_cues)
@@ -676,6 +764,35 @@ class LabelledSubsystemKGBuilder:
         return text[a0:a1]
 
     # -----------------------------
+    # Junk filter helpers
+    # -----------------------------
+    def _is_garbage_node(self, text: str) -> bool:
+        t = (text or "").strip().lower()
+        if not t:
+            return True
+
+        # strip punctuation-only
+        if not re.search(r"[a-zA-Z0-9]", t):
+            return True
+
+        # common single-token junk
+        if t in self.bad_single_tokens:
+            return True
+
+        # single word: too short or verb-junk
+        if len(t.split()) == 1:
+            if len(t) <= 3:
+                return True
+            if t in self.bad_single_verbs:
+                return True
+
+        # kill trivial "the X" remnants if short
+        if t.startswith(self.determiner_prefix) and len(t.split()) <= 2:
+            return True
+
+        return False
+
+    # -----------------------------
     # NER + value helpers
     # -----------------------------
     def _ner_override(self, start: int, end: int, ner_spans) -> Optional[str]:
@@ -699,7 +816,7 @@ class LabelledSubsystemKGBuilder:
     def _looks_like_value(self, txt: str) -> bool:
         return bool(re.search(
             r"\b\d+(?:\.\d+)?\s*(?:km|m|s|ms|w|mw|kw|hz|khz|mhz|ghz|v|mv|a|ma|db|dbi|kbps|mbps|gbps|kbit/s|mbit/s|gbit/s|°c|c|k|%)\b",
-            txt.lower()
+            (txt or "").lower()
         ))
 
     # -----------------------------
@@ -741,11 +858,18 @@ class LabelledSubsystemKGBuilder:
         x = re.sub(r"\s+", " ", x).strip(" ,.;:()[]{}\"'")
         x = x.replace("–", "-").replace("—", "-")
 
+        # strip leading determiners to avoid "the cairt" as a node id
+        x_low = x.lower()
+        x_low = re.sub(r"^(the|a|an|this|that|these|those)\s+", "", x_low).strip()
+        x = x_low if x_low else x
+
+        # Keep acronyms uppercase-ish
         if re.fullmatch(r"[A-Z0-9&/\-]{2,}", x):
             pass
         else:
             x = x.lower()
 
+        # cheap singularization (avoid "bus")
         if x.endswith("ies") and len(x) > 4:
             x = x[:-3] + "y"
         elif x.endswith("s") and len(x) > 4 and not x.endswith("ss") and not x.endswith("bus"):
@@ -767,6 +891,16 @@ class LabelledSubsystemKGBuilder:
     # Vocab loading
     # -----------------------------
     def _load_vocab_files(self, vocab_dir: str) -> None:
+        """
+        Loads:
+          - data/vocab/esa_acronym_map.json
+          - data/vocab/esa_science_terms.csv
+          - data/vocab/esa_missions.csv (NEW)
+
+        esa_missions.csv format:
+          name,canonical,type
+          CAIRT,Changing-Atmosphere Infra-Red Tomography Explorer,MISSION
+        """
         if not vocab_dir or not os.path.isdir(vocab_dir):
             return
 
@@ -806,5 +940,18 @@ class LabelledSubsystemKGBuilder:
                         except Exception:
                             conf = 0.75
                         self.science_terms[term.lower()] = (sub, float(conf))
+            except Exception:
+                pass
+
+        missions_path = os.path.join(vocab_dir, "esa_missions.csv")
+        if os.path.exists(missions_path):
+            try:
+                with open(missions_path, "r", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        name = (row.get("name") or "").strip()
+                        canonical = (row.get("canonical") or name).strip()
+                        if name:
+                            self.missions[name.lower()] = canonical
             except Exception:
                 pass
