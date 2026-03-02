@@ -38,6 +38,13 @@ except Exception:
     compute_metrics = None
     metrics_to_dict = None
 
+# LLM Router (ESA sentence routing)
+try:
+    from modules.llm.esa_router import route_esa_text, engineering_only_text
+except Exception:
+    route_esa_text = None
+    engineering_only_text = None
+
 
 # -----------------------------
 # Helpers
@@ -284,6 +291,10 @@ st.caption(
     "Includes PDF mode, comparison mode, analytics, and exports."
 )
 
+# Load OpenAI key from Streamlit secrets if available
+if "OPENAI_API_KEY" in st.secrets:
+    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+
 
 # -----------------------------
 # Session state init
@@ -340,6 +351,17 @@ with st.sidebar:
         value=True,
         help="Build and show two graphs side-by-side: Baseline (co-occurrence) vs Improved (subsystem labels + ontology).",
     )
+
+    st.divider()
+
+    use_llm_router = st.checkbox(
+        "Use LLM routing (recommended for ESA PDF paragraphs)",
+        value=True,
+        help="Filters science background sentences before subsystem KG extraction.",
+        disabled=(route_esa_text is None or engineering_only_text is None),
+    )
+    if route_esa_text is None or engineering_only_text is None:
+        st.caption("LLM router not available. Add modules/llm/esa_router.py and install openai.")
 
     st.divider()
     min_conf = st.slider("Min confidence", 0.0, 1.0, 0.20, 0.05)
@@ -464,7 +486,29 @@ with col_graph:
                 )
 
             if st.session_state.labelled_builder is not None:
-                st.session_state.improved_graph = build_improved_graph(source_text, st.session_state.labelled_builder)
+                improved_input_text = source_text
+
+                # --- LLM Routing Layer ---
+                if use_llm_router and route_esa_text is not None and engineering_only_text is not None:
+                    try:
+                        routed = route_esa_text(source_text)
+                        improved_input_text = engineering_only_text(routed, min_conf=0.55)
+
+                        with st.expander("LLM Routing Debug"):
+                            st.write(routed)
+                            st.write("Engineering-only text:")
+                            st.write(improved_input_text)
+
+                        # If routing removes too much, fall back to original to avoid empty graphs
+                        if len((improved_input_text or "").strip()) < 80:
+                            st.warning("LLM routing kept very little engineering text; falling back to full text.")
+                            improved_input_text = source_text
+
+                    except Exception as e:
+                        st.warning(f"LLM routing failed: {e}")
+                        improved_input_text = source_text
+
+                st.session_state.improved_graph = build_improved_graph(improved_input_text, st.session_state.labelled_builder)
             else:
                 st.session_state.improved_graph = nx.DiGraph()
 
