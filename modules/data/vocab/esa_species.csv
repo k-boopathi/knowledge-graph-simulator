@@ -1,0 +1,9 @@
+name,canonical,type
+CO2,CO2,SPECIES
+CH4,CH4,SPECIES
+NH3,NH3,SPECIES
+NO2,NO2,SPECIES
+NOx,NOx,SPECIES
+ozone,ozone,SPECIES
+water vapour,water vapour,SPECIES
+aerosols,aerosols,SPECIES
