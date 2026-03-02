@@ -1,0 +1,9 @@
+name,canonical,type
+MIPAS,Michelson Interferometer for Passive Atmospheric Sounding,INSTRUMENT
+SAR,Synthetic Aperture Radar,INSTRUMENT
+TIR,Thermal Infra-Red instrument,INSTRUMENT
+Doppler radar,94 GHz Doppler radar,INSTRUMENT
+imaging spectrometer,imaging spectrometer,INSTRUMENT
+Fourier-transform infrared,Fourier-transform infrared,TECHNOLOGY
+radar interferometer,along-track radar interferometer,TECHNOLOGY
+microbolometer,uncooled microbolometer,TECHNOLOGY
